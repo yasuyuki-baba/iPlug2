@@ -129,7 +129,7 @@ if(NOT TARGET iPlug2::APP)
     target_sources(iPlug2::APP INTERFACE ${IPLUG2_SWELL_SRC})
 
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(GDK3 REQUIRED gdk-3.0)
+    pkg_check_modules(GDK3 REQUIRED gdk-3.0 gio-2.0)
     pkg_check_modules(FREETYPE REQUIRED freetype2)
     pkg_check_modules(ALSA REQUIRED alsa)
     pkg_check_modules(JACK REQUIRED jack)

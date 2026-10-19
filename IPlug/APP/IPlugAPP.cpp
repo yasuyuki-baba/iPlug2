@@ -43,7 +43,7 @@ bool IPlugAPP::EditorResize(int viewWidth, int viewHeight)
   
   if (viewWidth != GetEditorWidth() || viewHeight != GetEditorHeight())
   {
-    #if defined OS_MAC || defined NO_IGRAPHICS 
+    #if defined OS_MAC || defined OS_LINUX || defined NO_IGRAPHICS
     RECT rcClient, rcWindow;
     POINT ptDiff;
     
@@ -58,6 +58,9 @@ bool IPlugAPP::EditorResize(int viewWidth, int viewHeight)
     #ifdef OS_WIN
     flags = SWP_NOMOVE;
     float ss = GetScaleForHWND(gHWND);
+    #elif defined OS_LINUX
+    flags = SWP_NOMOVE | SWP_NOZORDER;
+    float ss = 1.f;
     #else
     float ss = 1.f;
     #endif

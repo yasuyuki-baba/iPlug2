@@ -144,6 +144,9 @@ void IPlugAPIBase::SendParameterValueFromAPI(int paramIdx, double value, bool no
 
 void IPlugAPIBase::OnTimer(Timer& t)
 {
+#if defined OS_LINUX && IPLUG_EDITOR && !defined NO_IGRAPHICS
+  std::lock_guard<std::recursive_mutex> gfxLock(GfxMutex());
+#endif
 // VST3 ********************************************************************************
 #if defined VST3P_API || defined VST3_API
   while (mMidiMsgsFromProcessor.ElementsAvailable())

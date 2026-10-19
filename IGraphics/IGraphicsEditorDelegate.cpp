@@ -73,35 +73,8 @@ void IGEditorDelegate::OnParentWindowResize(int width, int height)
   IPLUG_GFX_LOCK;
   if (auto* pGraphics = GetUI())
   {
-    if (pGraphics->GetResizingInProcess())
-    {
-      pGraphics->CancelDragResize();
-    }
-
-    const float platScale = pGraphics->GetPlatformWindowScale();
-    const int physW = static_cast<int>(width / platScale);
-    const int physH = static_cast<int>(height / platScale);
-    pGraphics->OnBeginHostResize(physW, physH);
-
-    if (pGraphics->GetResizerMode() == EUIResizerMode::Scale)
-    {
-      // Scale mode: keep logical dimensions, adjust draw scale.
-      // Use min so the entire UI fits within the window. If the host
-      // doesn't constrain to the design aspect ratio, this letterboxes
-      // rather than clipping the top/bottom or sides.
-      const int logW = pGraphics->Width();
-      const int logH = pGraphics->Height();
-      const float scaleX = static_cast<float>(physW) / logW;
-      const float scaleY = static_cast<float>(physH) / logH;
-      const float newScale = std::min(scaleX, scaleY);
-      pGraphics->Resize(logW, logH, newScale, false);
-    }
-    else
-    {
-      pGraphics->Resize(physW, physH, 1.0f, false);
-    }
-
-    pGraphics->OnEndHostResize();
+    const auto scale = pGraphics->GetPlatformWindowScale();
+    pGraphics->Resize(static_cast<int>(width / scale), static_cast<int>(height / scale), 1.0f, false);
   }
 }
 

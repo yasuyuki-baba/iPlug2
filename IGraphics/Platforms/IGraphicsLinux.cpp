@@ -1559,23 +1559,9 @@ void IGraphicsLinux::ProcessX11Events()
         // avoid a resize oscillation.
         mInConfigureNotify = true;
 
-        if (GetResizerMode() == EUIResizerMode::Scale)
-        {
-          // Scale mode: keep logical dimensions, adjust drawScale
-          const int logW = Width();
-          const int logH = Height();
-          const float scaleX = static_cast<float>(physW) / (logW * ss);
-          const float scaleY = static_cast<float>(physH) / (logH * ss);
-          const float newScale = std::max(scaleX, scaleY);
-          Resize(logW, logH, newScale, false);
-        }
-        else
-        {
-          // Size mode: physical pixels to logical
-          const int w = static_cast<int>(physW / ss);
-          const int h = static_cast<int>(physH / ss);
-          Resize(w, h, 1.0f, false);
-        }
+        const int width = static_cast<int>(physW / ss);
+        const int height = static_cast<int>(physH / ss);
+        Resize(width, height, 1.0f, false);
 
         mInConfigureNotify = false;
         break;
