@@ -145,18 +145,31 @@ void Timer_impl::TimerProc(void* userData)
 }
 #elif defined OS_LINUX
 #include <unistd.h>
+#include <cstdio>
 
 Timer* Timer::Create(ITimerFunction func, uint32_t intervalMs)
 {
-  return new Timer_impl(func, intervalMs);
+  auto* pTimer = new Timer_impl(func, intervalMs);
+  if (!pTimer->mThread)
+  {
+    delete pTimer;
+    return nullptr;
+  }
+  return pTimer;
 }
 
 Timer_impl::Timer_impl(ITimerFunction func, uint32_t intervalMs)
 : mTimerFunc(func)
 , mIntervalMs(intervalMs)
 {
-  if (pthread_create(&mThread, nullptr, ThreadProc, this) == 0)
-    mRunning = true;
+  mRunning = true;
+  const int error = pthread_create(&mThread, nullptr, ThreadProc, this);
+  if (error)
+  {
+    mRunning = false;
+    mThread = 0;
+    fprintf(stderr, "Could not start Linux timer: %s\n", strerror(error));
+  }
 }
 
 Timer_impl::~Timer_impl()

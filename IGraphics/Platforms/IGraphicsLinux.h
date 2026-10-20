@@ -185,7 +185,7 @@ private:
   unsigned mLastPhysW = 0;
   unsigned mLastPhysH = 0;
 
-  void StartTimer();
+  bool StartTimer();
   void StopTimer();
 
   static void* TimerThreadProc(void* pParam);

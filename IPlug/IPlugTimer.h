@@ -47,6 +47,7 @@ struct Timer
   
   using ITimerFunction = std::function<void(Timer& t)>;
 
+  /** On Linux, returns nullptr if the worker thread cannot be created. */
   static Timer* Create(ITimerFunction func, uint32_t intervalMs);
   virtual ~Timer() {};
   virtual void Stop() = 0;
@@ -107,6 +108,7 @@ public:
   void Stop() override;
 
 private:
+  friend struct Timer;
   static void* ThreadProc(void* pParam);
   ITimerFunction mTimerFunc;
   uint32_t mIntervalMs;

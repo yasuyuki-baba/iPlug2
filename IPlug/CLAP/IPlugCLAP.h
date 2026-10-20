@@ -182,9 +182,13 @@ private:
   void onTimer(clap_id timerId) noexcept override;
   bool implementsPosixFdSupport() const noexcept override { return true; }
   void onPosixFd(int fd, clap_posix_fd_flags_t flags) noexcept override;
-  void RegisterLinuxHostCallbacks() noexcept;
+  void onMainThread() noexcept override;
+  bool RegisterLinuxHostCallbacks() noexcept;
   void UnregisterLinuxHostCallbacks() noexcept;
   clap_id mLinuxTimerId = CLAP_INVALID_ID;
+  int mLinuxFd = -1;
+  std::unique_ptr<Timer> mLinuxGuiTimer;
+  std::atomic<bool> mLinuxCallbackPending{false};
 #endif
 
   // Parameter flushing from GUI

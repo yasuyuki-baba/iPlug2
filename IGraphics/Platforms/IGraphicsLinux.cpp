@@ -135,6 +135,7 @@ static constexpr int kGTK_RESPONSE_OK     = -5;
 static constexpr int kGTK_RESPONSE_CANCEL = -6;
 static constexpr int kGTK_RESPONSE_YES    = -8;
 static constexpr int kGTK_RESPONSE_NO     = -9;
+static constexpr int kGTK_RESPONSE_RETRY  = 1;
 
 // GTK file-chooser action codes
 static constexpr int kGTK_FILE_CHOOSER_ACTION_OPEN          = 0;
@@ -142,6 +143,7 @@ static constexpr int kGTK_FILE_CHOOSER_ACTION_SAVE          = 1;
 static constexpr int kGTK_FILE_CHOOSER_ACTION_SELECT_FOLDER = 2;
 
 // GTK button presets used by message dialogs
+static constexpr int kGTK_BUTTONS_NONE      = 0;
 static constexpr int kGTK_BUTTONS_OK        = 1;
 static constexpr int kGTK_BUTTONS_YES_NO    = 4;
 static constexpr int kGTK_BUTTONS_OK_CANCEL = 5;
@@ -160,6 +162,7 @@ struct GTK3
   using fn_main_iteration_do        = int   (*)(int);
   // Dialogs
   using fn_dialog_run               = int   (*)(void*);
+  using fn_dialog_add_button        = void* (*)(void*, const char*, int);
   using fn_widget_destroy           = void  (*)(void*);
   using fn_window_set_title         = void  (*)(void*, const char*);
   // File chooser
@@ -222,6 +225,7 @@ struct GTK3
   fn_events_pending           events_pending           = nullptr;
   fn_main_iteration_do        main_iteration_do        = nullptr;
   fn_dialog_run               dialog_run               = nullptr;
+  fn_dialog_add_button        dialog_add_button        = nullptr;
   fn_widget_destroy           widget_destroy           = nullptr;
   fn_window_set_title         window_set_title         = nullptr;
   fn_file_chooser_dialog_new  file_chooser_dialog_new  = nullptr;
@@ -286,6 +290,7 @@ static GTK3* LoadGTK3()
   LOAD_GTK_SYM(gtk, events_pending);
   LOAD_GTK_SYM(gtk, main_iteration_do);
   LOAD_GTK_SYM(gtk, dialog_run);
+  LOAD_GTK_SYM(gtk, dialog_add_button);
   LOAD_GTK_SYM(gtk, widget_destroy);
   LOAD_GTK_SYM(gtk, window_set_title);
   LOAD_GTK_SYM(gtk, file_chooser_dialog_new);
@@ -366,6 +371,56 @@ static void GtkPresentDialog(GTK3* g, void* dialog)
     g->window_set_modal(dialog, 1);
   if (g->window_present)
     g->window_present(dialog);
+}
+
+static bool GtkAddFileFilters(GTK3* g, void* dialog, const char* ext)
+{
+  WDL_String extensions(ext ? ext : "");
+  char* context = nullptr;
+  char* token = strtok_r(extensions.Get(), " \t\r\n", &context);
+  if (!token)
+    return true;
+
+  if (!g->file_filter_new || !g->file_filter_add_pattern || !g->file_chooser_add_filter)
+  {
+    fprintf(stderr, "Cannot apply file dialog filters: required GTK functions are unavailable\n");
+    return false;
+  }
+
+  void* filter = g->file_filter_new();
+  if (!filter)
+  {
+    fprintf(stderr, "Could not create the file extension filter\n");
+    return false;
+  }
+  if (g->file_filter_set_name)
+    g->file_filter_set_name(filter, ext);
+  do
+  {
+    WDL_String pattern;
+    if (token[0] == '*')
+      pattern.Set(token);
+    else
+    {
+      pattern.Set("*.");
+      pattern.Append(token[0] == '.' ? token + 1 : token);
+    }
+    g->file_filter_add_pattern(filter, pattern.Get());
+    token = strtok_r(nullptr, " \t\r\n", &context);
+  } while (token);
+  g->file_chooser_add_filter(dialog, filter);
+
+  void* all = g->file_filter_new();
+  if (!all)
+  {
+    fprintf(stderr, "Could not create the all-files filter\n");
+    return false;
+  }
+  if (g->file_filter_set_name)
+    g->file_filter_set_name(all, "All Files");
+  g->file_filter_add_pattern(all, "*");
+  g->file_chooser_add_filter(dialog, all);
+  return true;
 }
 
 // ---- Runtime fontconfig (optional — loaded via dlopen so plugins work without it) ----
@@ -630,7 +685,11 @@ void* IGraphicsLinux::OpenWindow(void* pParent)
   // Mark dirty so the first timer tick renders immediately, even if no
   // Expose event arrives before the initial frame.
   mNeedsRedraw = true;
-  StartTimer();
+  if (!StartTimer())
+  {
+    CloseWindow();
+    return nullptr;
+  }
 
   return (void*)(uintptr_t)mPlugWnd;
 }
@@ -823,25 +882,50 @@ EMsgBoxResult IGraphicsLinux::ShowMessageBox(const char* str, const char* title,
                                              EMsgBoxType type,
                                              IMsgBoxCompletionHandlerFunc completionHandler)
 {
-  GTK3* g = LoadGTK3();
-  if (!g || !g->message_dialog_new)
-  {
+  auto complete = [&](EMsgBoxResult result) {
     if (completionHandler)
-      completionHandler(EMsgBoxResult::kOK);
-    return EMsgBoxResult::kOK;
+      completionHandler(result);
+    return result;
+  };
+  GTK3* g = LoadGTK3();
+  const bool customButtons = type == kMB_YESNOCANCEL || type == kMB_RETRYCANCEL;
+  if (!g || !g->message_dialog_new || (customButtons && !g->dialog_add_button))
+  {
+    fprintf(stderr, "Cannot show message box: required GTK functions are unavailable\n");
+    return complete(kCANCEL);
   }
 
   int gtkMsgType  = kGTK_MESSAGE_INFO;
   int gtkBtnType  = kGTK_BUTTONS_OK;
   switch (type)
   {
+    case kMB_OK:          break;
     case kMB_OKCANCEL:    gtkMsgType = kGTK_MESSAGE_QUESTION; gtkBtnType = kGTK_BUTTONS_OK_CANCEL; break;
     case kMB_YESNO:       gtkMsgType = kGTK_MESSAGE_QUESTION; gtkBtnType = kGTK_BUTTONS_YES_NO;    break;
-    case kMB_YESNOCANCEL: gtkMsgType = kGTK_MESSAGE_QUESTION; gtkBtnType = kGTK_BUTTONS_OK_CANCEL; break;
-    default:              break;
+    case kMB_YESNOCANCEL:
+    case kMB_RETRYCANCEL: gtkMsgType = kGTK_MESSAGE_QUESTION; gtkBtnType = kGTK_BUTTONS_NONE; break;
+    default:
+      fprintf(stderr, "Cannot show message box: unsupported button type %d\n", type);
+      return complete(kCANCEL);
   }
 
-  void* dialog = g->message_dialog_new(nullptr, 0, gtkMsgType, gtkBtnType, "%s", str);
+  void* dialog = g->message_dialog_new(nullptr, 0, gtkMsgType, gtkBtnType, "%s", str ? str : "");
+  if (!dialog)
+  {
+    fprintf(stderr, "Could not create the message box\n");
+    return complete(kCANCEL);
+  }
+  if (type == kMB_YESNOCANCEL)
+  {
+    g->dialog_add_button(dialog, "_Cancel", kGTK_RESPONSE_CANCEL);
+    g->dialog_add_button(dialog, "_No", kGTK_RESPONSE_NO);
+    g->dialog_add_button(dialog, "_Yes", kGTK_RESPONSE_YES);
+  }
+  else if (type == kMB_RETRYCANCEL)
+  {
+    g->dialog_add_button(dialog, "_Cancel", kGTK_RESPONSE_CANCEL);
+    g->dialog_add_button(dialog, "_Retry", kGTK_RESPONSE_RETRY);
+  }
   if (title && g->window_set_title)
     g->window_set_title(dialog, title);
   GtkPresentDialog(g, dialog);
@@ -850,19 +934,18 @@ EMsgBoxResult IGraphicsLinux::ShowMessageBox(const char* str, const char* title,
   g->widget_destroy(dialog);
   GtkDrainEvents(g);
 
-  EMsgBoxResult result = kOK;
+  EMsgBoxResult result = kCANCEL;
   switch (resp)
   {
     case kGTK_RESPONSE_OK:     result = kOK;     break;
     case kGTK_RESPONSE_YES:    result = kYES;    break;
     case kGTK_RESPONSE_NO:     result = kNO;     break;
     case kGTK_RESPONSE_CANCEL: result = kCANCEL; break;
+    case kGTK_RESPONSE_RETRY:  result = kRETRY;  break;
     default:                   result = kCANCEL; break;
   }
 
-  if (completionHandler)
-    completionHandler(result);
-  return result;
+  return complete(result);
 }
 
 bool IGraphicsLinux::RevealPathInExplorerOrFinder(WDL_String& path, bool select)
@@ -889,11 +972,18 @@ void IGraphicsLinux::PromptForFile(WDL_String& fileName, WDL_String& path,
                                    EFileAction action, const char* ext,
                                    IFileDialogCompletionHandlerFunc completionHandler)
 {
+  WDL_String outFile, outPath;
+  auto complete = [&]() {
+    fileName.Set(outFile.Get());
+    path.Set(outPath.Get());
+    if (completionHandler)
+      completionHandler(fileName, path);
+  };
   GTK3* g = LoadGTK3();
   if (!g)
   {
-    if (completionHandler)
-      completionHandler(WDL_String{}, WDL_String{});
+    fprintf(stderr, "Cannot show file dialog: GTK is unavailable\n");
+    complete();
     return;
   }
 
@@ -908,20 +998,18 @@ void IGraphicsLinux::PromptForFile(WDL_String& fileName, WDL_String& path,
     nullptr
   );
 
-  // Add extension filter
-  if (ext && ext[0] && g->file_filter_new)
+  if (!dialog)
   {
-    void* filter = g->file_filter_new();
-    WDL_String pat("*.");
-    pat.Append(ext);
-    if (g->file_filter_set_name)  g->file_filter_set_name(filter, ext);
-    if (g->file_filter_add_pattern) g->file_filter_add_pattern(filter, pat.Get());
-    if (g->file_chooser_add_filter) g->file_chooser_add_filter(dialog, filter);
-
-    void* all = g->file_filter_new();
-    if (g->file_filter_set_name)    g->file_filter_set_name(all, "All Files");
-    if (g->file_filter_add_pattern) g->file_filter_add_pattern(all, "*");
-    if (g->file_chooser_add_filter) g->file_chooser_add_filter(dialog, all);
+    fprintf(stderr, "Could not create the file dialog\n");
+    complete();
+    return;
+  }
+  if (!GtkAddFileFilters(g, dialog, ext))
+  {
+    g->widget_destroy(dialog);
+    GtkDrainEvents(g);
+    complete();
+    return;
   }
 
   // Set initial directory
@@ -933,7 +1021,6 @@ void IGraphicsLinux::PromptForFile(WDL_String& fileName, WDL_String& path,
     g->file_chooser_set_current_name(dialog, fileName.Get());
   GtkPresentDialog(g, dialog);
 
-  WDL_String outFile, outPath;
   if (g->dialog_run(dialog) == kGTK_RESPONSE_OK)
   {
     char* chosen = g->file_chooser_get_filename(dialog);
@@ -945,23 +1032,30 @@ void IGraphicsLinux::PromptForFile(WDL_String& fileName, WDL_String& path,
         outPath.Set(chosen, (int)(slash - chosen + 1));
       free(chosen);
     }
+    else
+      fprintf(stderr, "File dialog accepted without a selected file\n");
   }
 
   g->widget_destroy(dialog);
   GtkDrainEvents(g);
 
-  if (completionHandler)
-    completionHandler(outFile, outPath);
+  complete();
 }
 
 void IGraphicsLinux::PromptForDirectory(WDL_String& dir,
                                         IFileDialogCompletionHandlerFunc completionHandler)
 {
+  WDL_String outDir;
+  auto complete = [&]() {
+    dir.Set(outDir.Get());
+    if (completionHandler)
+      completionHandler(WDL_String{}, dir);
+  };
   GTK3* g = LoadGTK3();
   if (!g)
   {
-    if (completionHandler)
-      completionHandler(WDL_String{}, WDL_String{});
+    fprintf(stderr, "Cannot show directory dialog: GTK is unavailable\n");
+    complete();
     return;
   }
 
@@ -972,26 +1066,35 @@ void IGraphicsLinux::PromptForDirectory(WDL_String& dir,
     nullptr
   );
 
+  if (!dialog)
+  {
+    fprintf(stderr, "Could not create the directory dialog\n");
+    complete();
+    return;
+  }
+
   if (dir.GetLength() && g->file_chooser_set_current_folder)
     g->file_chooser_set_current_folder(dialog, dir.Get());
   GtkPresentDialog(g, dialog);
 
-  WDL_String outDir;
   if (g->dialog_run(dialog) == kGTK_RESPONSE_OK)
   {
     char* chosen = g->file_chooser_get_filename(dialog);
     if (chosen)
     {
       outDir.Set(chosen);
+      if (outDir.GetLength() && outDir.Get()[outDir.GetLength() - 1] != '/')
+        outDir.Append("/");
       free(chosen);
     }
+    else
+      fprintf(stderr, "Directory dialog accepted without a selected directory\n");
   }
 
   g->widget_destroy(dialog);
   GtkDrainEvents(g);
 
-  if (completionHandler)
-    completionHandler(outDir, WDL_String{});
+  complete();
 }
 
 bool IGraphicsLinux::PromptForColor(IColor& color, const char* str,
@@ -1043,7 +1146,17 @@ bool IGraphicsLinux::OpenURL(const char* url, const char* msgWindowTitle, const 
 
 bool IGraphicsLinux::GetTextFromClipboard(WDL_String& str)
 {
+  std::lock_guard<std::recursive_mutex> lock(GetDelegate()->GfxMutex());
   if (!mDisplay || !mPlugWnd || !mClipboardAtom)
+    return false;
+
+  const Window owner = XGetSelectionOwner(mDisplay, mClipboardAtom);
+  if (owner == mPlugWnd)
+  {
+    str.Set(mClipboardText.Get());
+    return true;
+  }
+  if (!owner)
     return false;
 
   // Ask the clipboard owner to convert to UTF-8 and store in our scratch property
@@ -1051,7 +1164,7 @@ bool IGraphicsLinux::GetTextFromClipboard(WDL_String& str)
                     mPlugWnd, 0L /* CurrentTime */);
   XFlush(mDisplay);
 
-  // Poll up to 500 ms; the timer thread processes SelectionNotify for us
+  // Keep the event consumer locked out until we have read SelectionNotify.
   for (int i = 0; i < 50; ++i)
   {
     usleep(10000); // 10 ms
@@ -1070,13 +1183,14 @@ bool IGraphicsLinux::GetTextFromClipboard(WDL_String& str)
       unsigned long nitems, remaining;
       unsigned char* data = nullptr;
 
-      XGetWindowProperty(mDisplay, mPlugWnd, mSelDataAtom,
+      const int status = XGetWindowProperty(mDisplay, mPlugWnd, mSelDataAtom,
                          0, 65536, 1 /* delete after read */,
                          AnyPropertyType, &type, &fmt,
                          &nitems, &remaining, &data);
       // Require remaining == 0 so we never report success on a truncated
       // read, and bound nitems before the int cast to avoid UB.
-      if (data && nitems > 0 && remaining == 0 && nitems <= 0x7FFFFFFFUL)
+      if (status == 0 && fmt == 8 && (type == mUTF8StringAtom || type == XA_STRING) &&
+          data && remaining == 0 && nitems <= 0x7FFFFFFFUL)
       {
         str.Set((const char*)data, (int)nitems);
         XFree(data);
@@ -1086,11 +1200,13 @@ bool IGraphicsLinux::GetTextFromClipboard(WDL_String& str)
       return false;
     }
   }
+  fprintf(stderr, "Timed out waiting for the X11 clipboard owner\n");
   return false;
 }
 
 bool IGraphicsLinux::SetTextInClipboard(const char* str)
 {
+  std::lock_guard<std::recursive_mutex> lock(GetDelegate()->GfxMutex());
   if (!mDisplay || !mPlugWnd || !mClipboardAtom)
     return false;
 
@@ -1735,7 +1851,8 @@ void IGraphicsLinux::ProcessX11Events()
 
       // We've lost clipboard ownership; discard our stored text
       case SelectionClear:
-        mClipboardText.Set("");
+        if (XGetSelectionOwner(mDisplay, mClipboardAtom) != mPlugWnd)
+          mClipboardText.Set("");
         break;
 
       default:
@@ -1756,12 +1873,22 @@ void* IGraphicsLinux::TimerThreadProc(void* pParam)
   return nullptr;
 }
 
-void IGraphicsLinux::StartTimer()
+bool IGraphicsLinux::StartTimer()
 {
-  if (mHostDriven)
-    return;  // host provides timer/fd callbacks; no internal thread needed
-  if (pthread_create(&mTimerThread, nullptr, TimerThreadProc, this) == 0)
-    mTimerRunning = true;
+  if (mHostDriven || mTimerRunning)
+    return true;
+
+  mTimerRunning = true;
+  const int error = pthread_create(&mTimerThread, nullptr, TimerThreadProc, this);
+  if (error)
+  {
+    mTimerRunning = false;
+    mTimerThread = 0;
+    fprintf(stderr, "Could not start Linux graphics timer: %s\n", strerror(error));
+    return false;
+  }
+
+  return true;
 }
 
 void IGraphicsLinux::StopTimer()
@@ -1779,12 +1906,10 @@ void IGraphicsLinux::OnDisplayTimer()
   if (!mDisplay || !mPlugWnd)
     return;
 
-  // Hold the GfxMutex for the entire timer tick so that host-thread calls
-  // (SendParameterValueFromDelegate, CloseWindow, resize, etc.) cannot
-  // concurrently modify IGraphics state while we process events or draw.
-  // The mutex is recursive so ProcessX11Events() -> DrawResize() can
-  // re-enter safely.
-  std::lock_guard<std::recursive_mutex> lock(GetDelegate()->GfxMutex());
+  // Teardown joins this timer while holding GfxMutex; skip busy frames instead of waiting.
+  std::unique_lock<std::recursive_mutex> lock(GetDelegate()->GfxMutex(), std::try_to_lock);
+  if (!lock.owns_lock())
+    return;
 
   ProcessX11Events();
 

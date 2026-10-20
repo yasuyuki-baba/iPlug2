@@ -923,6 +923,9 @@ void IPlugCLAP::guiDestroy() noexcept
 
 bool IPlugCLAP::guiShow() noexcept
 {
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+  return HasUI() && (mGUIOpen || (mWindow && GUIWindowAttach(mWindow)));
+#else
   if (HasUI() && !mGUIOpen)
   {
     OpenWindow(mWindow);
@@ -932,10 +935,14 @@ bool IPlugCLAP::guiShow() noexcept
   {
     return false;
   }
+#endif
 }
 
 bool IPlugCLAP::guiHide() noexcept
 {
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+  UnregisterLinuxHostCallbacks();
+#endif
   if (HasUI())
   {
     CloseWindow();
@@ -987,14 +994,30 @@ bool IPlugCLAP::GUIWindowAttach(void* pWindow) noexcept
 {
   if (HasUI())
   {
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+    UnregisterLinuxHostCallbacks();
+    if (!OpenWindow(pWindow))
+    {
+      fprintf(stderr, "Could not attach the CLAP editor\n");
+      CloseWindow();
+      mGUIOpen = false;
+      return false;
+    }
+#else
     OpenWindow(pWindow);
+#endif
     mWindow = pWindow;
     mGUIOpen = true;
 #if defined OS_LINUX && !defined NO_IGRAPHICS
     // Switch to host-driven mode: stops the internal timer thread
     // and lets the host drive rendering via onTimer / onPosixFd.
     static_cast<IGraphicsLinux*>(GetUI())->SetHostDriven(true);
-    RegisterLinuxHostCallbacks();
+    if (!RegisterLinuxHostCallbacks())
+    {
+      CloseWindow();
+      mGUIOpen = false;
+      return false;
+    }
 #endif
     return true;
   }
@@ -1178,42 +1201,82 @@ uint32_t IPlugCLAP::NChannels(ERoute direction, uint32_t bus) const
 #if defined OS_LINUX && !defined NO_IGRAPHICS
 void IPlugCLAP::onTimer(clap_id timerId) noexcept
 {
-  if (timerId == mLinuxTimerId)
+  if (mGUIOpen && timerId != CLAP_INVALID_ID && timerId == mLinuxTimerId)
     if (auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI()))
       pGraphics->OnDisplayTimer();
 }
 
 void IPlugCLAP::onPosixFd(int fd, clap_posix_fd_flags_t flags) noexcept
 {
-  if (auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI()))
-    pGraphics->ProcessX11Events();
+  if (mGUIOpen && fd == mLinuxFd && (flags & CLAP_POSIX_FD_READ))
+  {
+    std::lock_guard<std::recursive_mutex> lock(GfxMutex());
+    if (auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI()))
+      pGraphics->ProcessX11Events();
+  }
 }
 
-void IPlugCLAP::RegisterLinuxHostCallbacks() noexcept
+void IPlugCLAP::onMainThread() noexcept
 {
-  if (!HasUI())
-    return;
+  if (mLinuxCallbackPending.exchange(false) && mGUIOpen)
+    if (auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI()))
+      pGraphics->OnDisplayTimer();
+}
+
+bool IPlugCLAP::RegisterLinuxHostCallbacks() noexcept
+{
   auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI());
+  if (!pGraphics || !pGraphics->WindowIsOpen())
+    return false;
+
   const int fd = pGraphics->GetX11Fd();
-  if (fd >= 0)
-    _host.posixFdSupportRegister(fd, CLAP_POSIX_FD_READ);
-  const uint32_t periodMs = static_cast<uint32_t>(1000.0 / pGraphics->FPS());
-  _host.timerSupportRegister(periodMs, &mLinuxTimerId);
+  if (fd >= 0 && _host.canUsePosixFdSupport())
+  {
+    if (_host.posixFdSupportRegister(fd, CLAP_POSIX_FD_READ))
+      mLinuxFd = fd;
+    else
+      fprintf(stderr, "CLAP host rejected the X11 file descriptor; polling on GUI ticks\n");
+  }
+  const uint32_t periodMs = std::max(1u, static_cast<uint32_t>(1000.0 / pGraphics->FPS()));
+  if (_host.canUseTimerSupport())
+  {
+    clap_id timerId = CLAP_INVALID_ID;
+    if (_host.timerSupportRegister(periodMs, &timerId) && timerId != CLAP_INVALID_ID)
+    {
+      mLinuxTimerId = timerId;
+      return true;
+    }
+  }
+
+  fprintf(stderr, "CLAP host timer unavailable; requesting main-thread GUI callbacks instead\n");
+  mLinuxGuiTimer.reset(Timer::Create([this](Timer&) {
+    if (!mLinuxCallbackPending.exchange(true))
+      _host.requestCallback();
+  }, periodMs));
+  if (!mLinuxGuiTimer)
+  {
+    fprintf(stderr, "Could not start the CLAP main-thread callback timer\n");
+    UnregisterLinuxHostCallbacks();
+    return false;
+  }
+  return true;
 }
 
 void IPlugCLAP::UnregisterLinuxHostCallbacks() noexcept
 {
+  mLinuxGuiTimer.reset();
+  mLinuxCallbackPending = false;
   if (mLinuxTimerId != CLAP_INVALID_ID)
   {
-    _host.timerSupportUnregister(mLinuxTimerId);
+    if (!_host.timerSupportUnregister(mLinuxTimerId))
+      fprintf(stderr, "Could not unregister the CLAP GUI timer\n");
     mLinuxTimerId = CLAP_INVALID_ID;
   }
-  if (HasUI())
+  if (mLinuxFd >= 0)
   {
-    auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI());
-    const int fd = pGraphics->GetX11Fd();
-    if (fd >= 0)
-      _host.posixFdSupportUnregister(fd);
+    if (!_host.posixFdSupportUnregister(mLinuxFd))
+      fprintf(stderr, "Could not unregister the CLAP X11 file descriptor\n");
+    mLinuxFd = -1;
   }
 }
 #endif

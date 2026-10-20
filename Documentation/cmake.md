@@ -133,6 +133,65 @@ cmake --build . --config Release
 - AUv3 is embedded in the standalone APP on macOS
 - Linux uses X11, NanoVG/GL3, and ALSA/JACK for audio
 
+An absent or incomplete VST3 SDK disables automatic VST3 target creation, without
+preventing standalone builds. CMake reports the first missing SDK file and the
+download command. To install it, run `./download-vst3-sdk.sh` from
+`Dependencies/IPlug/`, then configure again.
+
+### Linux runtime regression tests
+
+These tests use a separate build directory and never deploy plugins to user/system
+scan paths or use an audio device. Deployment fixtures copy only inside the test
+build directory. The tests require `xvfb`, `xauth`, and Mesa's software renderer
+(`libgl1-mesa-dri` on Ubuntu/Debian), in addition to the Linux build dependencies.
+The CLAP host tests also require the CLAP SDK and CLAP helpers headers.
+
+```bash
+cmake -S Tests/Linux -B build/linux-regression -DCMAKE_BUILD_TYPE=Release
+cmake --build build/linux-regression --parallel 2 \
+  --target IPlugEffect-app LinuxGuiTest LinuxStartupHooks \
+  LinuxDialogTest LinuxRuntimeTest LinuxClapHostTest
+ctest --test-dir build/linux-regression --output-on-failure
+```
+
+The suite checks repeated GUI startup, rendering and normal shutdown, early
+graphics-thread scheduling, thread/display initialization failures, ALSA error
+visibility, and missing/placeholder/incomplete/complete VST3 SDK detection.
+It also drives real GTK dialogs to check all message button sets, file open/save
+and directory selection, cancellation, reference outputs, callback results, and
+space-separated extension filters (with optional leading dots). A separate process
+checks safe cancellation when the optional GTK runtime cannot be loaded.
+Additional tests cover editor shutdown while the graphics mutex is held, core
+timer startup/failure and stopping, self-owned and external UTF-8/empty clipboards,
+and automatic/deferred deployment. A minimal CLAP host exercises absent, partial,
+and rejected timer/fd extensions, callback coalescing, GUI hide/show/destroy, and
+window/fallback-timer initialization failures.
+Fault-injection hooks and exported executable symbols are confined to this test
+build. The Linux Ninja CI job runs this suite with software OpenGL under Xvfb.
+
+Linux file/directory dialogs update their reference outputs before invoking the
+completion handler and clear them on cancellation or failure. Selected directory
+paths end in `/`; directory callbacks leave the filename argument empty and put
+the result in the path argument. Message boxes return `kCANCEL` and log an error
+when GTK is unavailable, rather than approving the action.
+
+Linux drawing skips a timer tick when the graphics mutex is busy, so editor
+teardown can join the drawing thread without a lock inversion. Core timer creation
+logs an error and returns `nullptr` if the worker cannot be created.
+
+CLAP uses host timers when available. If timer support is missing or registration
+fails, a private timer requests coalesced `on_main_thread` callbacks; X11 event
+handling and rendering still run on the host's main thread. Host fd support is
+optional because GUI ticks also poll X11. All registrations and fallback workers
+are released when the GUI is hidden or destroyed and recreated when shown again.
+
+For interactive standalone testing, `IPlugEffect --no-io` opens only the editor.
+Linux preserves ALSA diagnostics; audio startup failures leave the editor available
+for changing audio settings, while window/editor startup failures return a nonzero
+exit status. Native Linux requires a working ALSA device or JACK server. On WSLg,
+an installed JACK client library alone does not provide a server or a route to
+Windows audio; that routing must be configured separately.
+
 ## Build Commands
 
 ### Build All Targets
@@ -575,6 +634,11 @@ Plugins are automatically deployed (symlinked or copied) to standard locations:
 > **Note:** VST3/CLAP use per-user paths by default (spec-compliant, hosts scan both locations). For system-wide installation, use `-DIPLUG_VST3_DEPLOY_PATH="%COMMONPROGRAMFILES%\VST3"`.
 
 ### Deployment Options
+
+`iplug_configure_target()` retains automatic deployment for directly configured
+targets. When adding resources after configuration, pass `DEFER_DEPLOYMENT` and
+call `iplug_deploy_target()` after adding the resources. `iplug_add_plugin()` does
+this automatically so deployment runs once, after resource copying.
 
 ```bash
 # Disable automatic deployment

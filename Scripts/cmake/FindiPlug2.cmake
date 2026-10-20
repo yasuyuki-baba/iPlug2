@@ -171,6 +171,7 @@ endfunction()
 
 # Helper function to configure a target based on its type
 function(iplug_configure_target target target_type project_name)
+  cmake_parse_arguments(CONFIG "DEFER_DEPLOYMENT" "" "" ${ARGN})
   set(SUPPORTED_TYPES
     APP
     VST2
@@ -229,9 +230,10 @@ function(iplug_configure_target target target_type project_name)
   string(REPLACE "_" "-" function_suffix ${lowercase_type})
   cmake_language(CALL iplug_configure_${function_suffix} ${target} ${project_name})
 
-  # NOTE: Deployment is handled by callers AFTER resources are added,
-  # so that copy_directory captures the full bundle (including resources).
-  # See _iplug_create_desktop_targets in IPlugPlugin.cmake.
+  set(DEPLOYABLE_TYPES APP VST2 VST3 CLAP AUv2 AAX)
+  if(${target_type} IN_LIST DEPLOYABLE_TYPES AND NOT CONFIG_DEFER_DEPLOYMENT)
+    iplug_deploy_target(${target} ${target_type} ${project_name})
+  endif()
 
   # Debuggable plugin types
   set(DEBUGGABLE_TYPES "")

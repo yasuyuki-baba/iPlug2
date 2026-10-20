@@ -39,6 +39,7 @@ using namespace igraphics;
 #define IDT_SCREENSHOT_TIMER 1001
 #ifdef OS_LINUX
 #define WM_USER_OPENWINDOW (WM_USER + 1)
+#define IDT_OPENWINDOW_TIMER 1002
 static bool sPlugWindowOpen = false; // guards WM_SIZE before plugin window is ready
 #endif
 
@@ -580,7 +581,7 @@ WDL_DLGRET IPlugAPPHost::MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
 
 #ifdef OS_LINUX
       // On Linux, show the dialog but don't resize or open the window yet.
-      // main() calls SetMenu first, then posts WM_USER_OPENWINDOW which
+      // main() attaches any menu first, then posts WM_USER_OPENWINDOW which
       // triggers ClientResize + OpenWindow so the SWELL layout includes
       // the menu bar before the plugin window is created.
       ShowWindow(hwndDlg, SW_SHOW);
@@ -614,21 +615,33 @@ WDL_DLGRET IPlugAPPHost::MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
       // Posted from main() after SetMenu. Use a short timer to let the
       // GDK event loop process the SetMenu resize before we size and
       // open the plugin window.
-      SetTimer(hwndDlg, 0xF00D, 50, nullptr);
+      if (!sPlugWindowOpen && !SetTimer(hwndDlg, IDT_OPENWINDOW_TIMER, 50, nullptr))
+      {
+        fprintf(stderr, "Could not schedule standalone editor initialization\n");
+        gStandaloneExitStatus = EXIT_FAILURE;
+        DestroyWindow(hwndDlg);
+      }
       return 0;
     }
 #endif
     case WM_TIMER:
     {
 #ifdef OS_LINUX
-      if (wParam == 0xF00D)
+      if (wParam == IDT_OPENWINDOW_TIMER)
       {
-        KillTimer(hwndDlg, 0xF00D);
+        KillTimer(hwndDlg, IDT_OPENWINDOW_TIMER);
+        if (sPlugWindowOpen)
+          return 0;
         IPlugAPP* pPlug2 = pAppHost->GetPlug();
         ClientResize(hwndDlg, pPlug2->GetEditorWidth(),
                      pPlug2->GetEditorHeight());
         if (!pAppHost->OpenWindow(gHWND))
-          DBGMSG("couldn't attach gui\n");
+        {
+          fprintf(stderr, "Could not attach the standalone editor\n");
+          gStandaloneExitStatus = EXIT_FAILURE;
+          DestroyWindow(hwndDlg);
+          return 0;
+        }
         sPlugWindowOpen = true;
         return 0;
       }

@@ -14,24 +14,6 @@ if(NOT TARGET iPlug2::VST3)
   # Define SDK path
   set(VST3_SDK_DIR ${IPLUG_DEPS_DIR}/VST3_SDK)
 
-  # Check if VST3 SDK exists
-  if(NOT EXISTS ${VST3_SDK_DIR})
-    message(STATUS "VST3 SDK not found at ${VST3_SDK_DIR}. VST3 targets will not be available.")
-    set(IPLUG2_VST3_SUPPORTED FALSE CACHE INTERNAL "VST3 SDK available")
-    # Create a dummy iPlug2::VST3 target so projects can link to it without errors
-    add_library(iPlug2::VST3 INTERFACE IMPORTED)
-    # Define stub function that excludes the target from default build
-    function(iplug_configure_vst3 target project_name)
-      message(STATUS "Skipping VST3 target '${target}' - VST3 SDK not available")
-      set_target_properties(${target} PROPERTIES EXCLUDE_FROM_ALL TRUE)
-    endfunction()
-    return()
-  endif()
-
-  set(IPLUG2_VST3_SUPPORTED TRUE CACHE INTERNAL "VST3 SDK available")
-
-  add_library(iPlug2::VST3 INTERFACE IMPORTED)
-
   # iPlug2 VST3 wrapper sources
   set(VST3_IPLUG_SRC
     ${IPLUG_DIR}/VST3/IPlugVST3.cpp
@@ -78,7 +60,42 @@ if(NOT TARGET iPlug2::VST3)
     ${VST3_SDK_PLUGINTERFACES_SRC}
     ${VST3_SDK_COMMON_SRC}
     ${VST3_SDK_VST_SRC}
+    ${VST3_SDK_DIR}/public.sdk/source/main/pluginfactory.cpp
   )
+
+  if(WIN32)
+    list(APPEND VST3_SDK_SRC ${VST3_SDK_DIR}/public.sdk/source/main/dllmain.cpp)
+  elseif(APPLE)
+    list(APPEND VST3_SDK_SRC ${VST3_SDK_DIR}/public.sdk/source/main/macmain.cpp)
+  elseif(UNIX AND NOT EMSCRIPTEN)
+    list(APPEND VST3_SDK_SRC ${VST3_SDK_DIR}/public.sdk/source/main/linuxmain.cpp)
+  endif()
+
+  set(VST3_SDK_REQUIRED_FILES
+    ${VST3_SDK_SRC}
+    ${VST3_SDK_DIR}/base/source/fobject.h
+    ${VST3_SDK_DIR}/pluginterfaces/vst/ivstaudioprocessor.h
+    ${VST3_SDK_DIR}/public.sdk/source/vst/vstsinglecomponenteffect.h
+  )
+  foreach(_vst3_file IN LISTS VST3_SDK_REQUIRED_FILES)
+    if(NOT EXISTS "${_vst3_file}")
+      message(STATUS "VST3 SDK is missing or incomplete: ${_vst3_file}\n"
+        "VST3 targets will not be available. Run ./download-vst3-sdk.sh from Dependencies/IPlug.")
+      set(IPLUG2_VST3_SUPPORTED FALSE CACHE INTERNAL "VST3 SDK available")
+      add_library(iPlug2::VST3 INTERFACE IMPORTED)
+      function(iplug_configure_vst3 target project_name)
+        if(NOT IPLUG2_VST3_SUPPORTED)
+          message(FATAL_ERROR "Cannot configure VST3 target '${target}': install the complete VST3 SDK first.")
+        endif()
+
+        message(FATAL_ERROR "Cannot configure VST3 target '${target}': install the complete VST3 SDK first.")
+      endfunction()
+      return()
+    endif()
+  endforeach()
+
+  set(IPLUG2_VST3_SUPPORTED TRUE CACHE INTERNAL "VST3 SDK available")
+  add_library(iPlug2::VST3 INTERFACE IMPORTED)
 
   target_sources(iPlug2::VST3 INTERFACE
     ${VST3_IPLUG_SRC}
@@ -103,30 +120,14 @@ if(NOT TARGET iPlug2::VST3)
     $<$<NOT:$<CONFIG:Debug>>:RELEASE>
   )
 
-  # VST3 SDK main sources (common)
-  target_sources(iPlug2::VST3 INTERFACE
-    ${VST3_SDK_DIR}/public.sdk/source/main/pluginfactory.cpp
-  )
-
-  if(WIN32)
-    target_sources(iPlug2::VST3 INTERFACE
-      ${VST3_SDK_DIR}/public.sdk/source/main/dllmain.cpp
-    )
-  elseif(APPLE)
+  if(APPLE)
     # Set Obj-C++ for iPlug2 VST3 wrapper on macOS
     set_source_files_properties(${VST3_IPLUG_SRC} PROPERTIES LANGUAGE OBJCXX)
 
-    # macOS entry point
-    target_sources(iPlug2::VST3 INTERFACE
-      ${VST3_SDK_DIR}/public.sdk/source/main/macmain.cpp
-    )
     target_link_libraries(iPlug2::VST3 INTERFACE
       "-framework Cocoa"
     )
   elseif(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
-    target_sources(iPlug2::VST3 INTERFACE
-      ${VST3_SDK_DIR}/public.sdk/source/main/linuxmain.cpp
-    )
     target_link_libraries(iPlug2::VST3 INTERFACE pthread dl)
   endif()
 
