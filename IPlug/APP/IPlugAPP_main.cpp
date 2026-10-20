@@ -563,7 +563,11 @@ int main(int argc, char** argv)
   if (gNoIO)
     pAppHost->SetNoIO(true);
 
-  pAppHost->Init();
+  if (!pAppHost->Init())
+  {
+    fprintf(stderr, "Standalone initialization failed; audio and editor startup cancelled\n");
+    return 1;
+  }
   pAppHost->TryToChangeAudio();
 
   HMENU menu = LoadMenu(NULL, MAKEINTRESOURCE(IDR_MENU1));

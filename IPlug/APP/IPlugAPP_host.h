@@ -198,7 +198,7 @@ public:
 
   bool Init();
   bool InitState();
-  void UpdateINI();
+  bool UpdateINI();
   
   /** Returns the name of the audio device with a given RTAudio device ID
    * @param deviceID The ID RTAudio has given the audio device
