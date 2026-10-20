@@ -166,6 +166,8 @@ timer startup/failure and stopping, self-owned and external UTF-8/empty clipboar
 and automatic/deferred deployment. A minimal CLAP host exercises absent, partial,
 and rejected timer/fd extensions, callback coalescing, GUI hide/show/destroy, and
 window/fallback-timer initialization failures.
+The deployment fixture also checks Linux REAPER extension `reaper_*.so` naming
+and deployment of web resources alongside the extension using an isolated path.
 Fault-injection hooks and exported executable symbols are confined to this test
 build. The Linux Ninja CI job runs this suite with software OpenGL under Xvfb.
 

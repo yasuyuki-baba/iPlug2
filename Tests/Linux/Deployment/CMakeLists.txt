@@ -19,3 +19,10 @@ iplug_deploy_target(Deferred CLAP Deferred)
 
 _iplug_create_desktop_targets(High "CLAP" "${CMAKE_CURRENT_SOURCE_DIR}/Probe.cpp"
   "" "${CMAKE_CURRENT_SOURCE_DIR}/late.txt" "" "")
+
+add_library(iPlug2::ReaperExt INTERFACE IMPORTED)
+include("${IPLUG2_CMAKE_DIR}/ReaperExt.cmake")
+set(IPLUG_REAPEREXT_DEPLOY_PATH "${CMAKE_BINARY_DIR}/deploy/reaper" CACHE PATH "" FORCE)
+add_library(Reaper MODULE Probe.cpp)
+iplug_configure_reaperext(Reaper Reaper
+  WEB_RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/web")

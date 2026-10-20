@@ -17,9 +17,11 @@ foreach(target Direct Deferred High-clap)
 endforeach()
 file(REMOVE "${TEST_BINARY_DIR}/deploy/High.clap"
   "${TEST_BINARY_DIR}/deploy/resources/txt/late.txt"
-  "${TEST_BINARY_DIR}/out/resources/txt/late.txt")
+  "${TEST_BINARY_DIR}/out/resources/txt/late.txt"
+  "${TEST_BINARY_DIR}/deploy/reaper/reaper_Reaper.so"
+  "${TEST_BINARY_DIR}/deploy/reaper/Reaper/index.html")
 execute_process(COMMAND "${CMAKE_COMMAND}" --build "${TEST_BINARY_DIR}"
-  --clean-first --target Direct Deferred High-clap RESULT_VARIABLE result)
+  --clean-first --target Direct Deferred High-clap Reaper RESULT_VARIABLE result)
 if(NOT result EQUAL 0)
   message(FATAL_ERROR "Deployment fixture build failed")
 endif()
@@ -31,4 +33,12 @@ endforeach()
 file(READ "${TEST_BINARY_DIR}/deploy/resources/txt/late.txt" deployed)
 if(NOT deployed STREQUAL "deployment resource\n")
   message(FATAL_ERROR "Resources added after configuration were not deployed")
+endif()
+if(NOT EXISTS "${TEST_BINARY_DIR}/out/reaper_Reaper.so" OR
+   NOT EXISTS "${TEST_BINARY_DIR}/deploy/reaper/reaper_Reaper.so")
+  message(FATAL_ERROR "Linux REAPER extension output and deployment names do not match")
+endif()
+file(READ "${TEST_BINARY_DIR}/deploy/reaper/Reaper/index.html" deployed_web)
+if(NOT deployed_web STREQUAL "<p>REAPER deployment test</p>\n")
+  message(FATAL_ERROR "REAPER extension web resources were not deployed")
 endif()

@@ -12,6 +12,8 @@ void (*AttachWindowTopmostButton)(HWND hwnd);
 #include "resource.h"
 #include <vector>
 #include <map>
+#include <deque>
+#include <cstring>
 
 REAPER_PLUGIN_HINSTANCE gHINSTANCE;
 HWND gParent;
@@ -20,6 +22,43 @@ std::unique_ptr<PLUG_CLASS_NAME> gPlug;
 RECT gPrevBounds;
 int gErrorCount = 0;
 
+#ifndef NO_IGRAPHICS
+/**
+ * REAPER decides whether to run its main keyboard shortcuts before delivering a
+ * key message to an extension window. IGraphics' optional text-entry control is
+ * drawn inside the graphics HWND rather than using a native EDIT control, so
+ * REAPER cannot otherwise tell that the user is typing. Route keys to the
+ * focused extension window while an IGraphics text edit is active.
+ */
+static int TextEntryAcceleratorProc(MSG* msg, accelerator_register_t*)
+{
+  if (!msg || !gPlug || !gHWND)
+    return 0;
+
+  IGraphics* graphics = gPlug->GetUI();
+  if (!graphics || !graphics->GetControlInTextEntry())
+    return 0;
+
+  const HWND focusedWindow = GetFocus();
+  if (!focusedWindow || (focusedWindow != gHWND && !IsChild(gHWND, focusedWindow)))
+    return 0;
+
+#ifdef OS_WIN
+  if (msg->message == WM_SYSKEYDOWN || msg->message == WM_SYSKEYUP)
+    return -20;
+#endif
+
+  return -1;
+}
+
+// REAPER retains this pointer for the lifetime of the extension.
+accelerator_register_t gTextEntryAccelerator = {
+  TextEntryAcceleratorProc,
+  true,
+  nullptr
+};
+#endif
+
 /** Helper struct for registering Reaper Actions */
 struct ReaperAction
 {
@@ -27,9 +66,22 @@ struct ReaperAction
   gaccel_register_t accel = {{0,0,0}, ""};
   std::function<void()> func;
   bool addMenuItem = false;
+  const char* contextMenuId = nullptr; // REAPER context menu to add this action to, if any
+  const char* menuLabel = nullptr;     // label used in menus, defaults to the action name
 };
 
-std::vector<ReaperAction> gActions;
+// std::deque (not std::vector) so element addresses stay stable: REAPER keeps the
+// raw &gActions.back().accel pointer we register, which a vector realloc would dangle.
+std::deque<ReaperAction> gActions;
+
+// Persistent registration record for per-project state (see "projectconfig").
+// Must outlive registration, so it lives at file scope.
+project_config_extension_t gProjectConfig = {
+  ReaperExtBase::ProcessExtensionLine,
+  ReaperExtBase::SaveExtensionConfig,
+  ReaperExtBase::BeginLoadProjectState,
+  nullptr
+};
 
 //TODO: don't #include cpp here
 #include "ReaperExtBase.cpp"
@@ -70,33 +122,18 @@ extern "C"
       
       pRec->Register("hookcommand", (void*) ReaperExtBase::HookCommandProc);
       pRec->Register("toggleaction", (void*) ReaperExtBase::ToggleActionCallback);
-      
-      AddExtensionsMainMenu();
-      
-      gParent = pRec->hwnd_main;
-      
-      HMENU hMenu = GetSubMenu(GetMenu(gParent),
-#ifdef OS_WIN
-                               8
-#else // OS X has one extra menu
-                               9
+      pRec->Register("hookcustommenu", (void*) ReaperExtBase::MenuHook);
+      pRec->Register("hookpostcommand", (void*) ReaperExtBase::PostCommandProc);
+      pRec->Register("projectconfig", (void*) &gProjectConfig);
+#ifndef NO_IGRAPHICS
+      pRec->Register("accelerator", (void*) &gTextEntryAccelerator);
 #endif
-                               );
       
-      int menuIdx = 6;
-      
-      for(auto& action : gActions)
-      {
-        if(action.addMenuItem)
-        {
-          MENUITEMINFO mi={sizeof(MENUITEMINFO),};
-          mi.fMask = MIIM_TYPE | MIIM_ID;
-          mi.fType = MFT_STRING;
-          mi.dwTypeData = LPSTR(action.accel.desc);
-          mi.wID = action.accel.accel.cmd;
-          InsertMenuItem(hMenu, menuIdx++, TRUE, &mi);
-        }
-      }
+      // Creates the Extensions main menu if it doesn't exist yet. It is populated from
+      // ReaperExtBase::MenuHook(), which REAPER calls with menuidstr "Main extensions".
+      AddExtensionsMainMenu();
+
+      gParent = pRec->hwnd_main;
 
       return 1;
     }
