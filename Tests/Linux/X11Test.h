@@ -3,6 +3,18 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
+inline void SendNativeClose(Display* display, Window window)
+{
+  XEvent event {};
+  event.xclient.type = ClientMessage;
+  event.xclient.window = window;
+  event.xclient.message_type = XInternAtom(display, "WM_PROTOCOLS", False);
+  event.xclient.format = 32;
+  event.xclient.data.l[0] = XInternAtom(display, "WM_DELETE_WINDOW", False);
+  XSendEvent(display, window, False, 0, &event);
+  XSync(display, False);
+}
+
 inline Window FindEditor(Display* display, Window parent)
 {
   Window root, owner, *children = nullptr;

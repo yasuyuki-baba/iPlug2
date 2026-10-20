@@ -1,4 +1,5 @@
 #include <X11/Xlib.h>
+#include <X11/Xlib-xcb.h>
 #include <alsa/asoundlib.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -22,6 +23,11 @@ extern "C" int pthread_create(pthread_t* thread, const pthread_attr_t* attribute
   if (!create)
   {
     fprintf(stderr, "Linux regression hook could not resolve pthread_create\n");
+    return EAGAIN;
+  }
+  if (TestMode("clipboard-thread-fail"))
+  {
+    fprintf(stderr, "Injected clipboard worker creation failure\n");
     return EAGAIN;
   }
 
@@ -69,6 +75,11 @@ extern "C" Display* XOpenDisplay(const char* name)
     fprintf(stderr, "Linux regression hook could not resolve XOpenDisplay\n");
     return nullptr;
   }
+  if (TestMode("clipboard-display-fail"))
+  {
+    fprintf(stderr, "Injected clipboard display connection failure\n");
+    return nullptr;
+  }
 
   Dl_info info{};
   if (TestMode("window-fail") && dladdr(__builtin_return_address(0), &info) &&
@@ -78,4 +89,24 @@ extern "C" Display* XOpenDisplay(const char* name)
     return nullptr;
   }
   return open(name);
+}
+
+extern "C" xcb_connection_t* XGetXCBConnection(Display* display)
+{
+  using GetConnection = xcb_connection_t* (*)(Display*);
+  // Plugin dependencies may be in an RTLD_LOCAL scope, outside this preload hook's RTLD_NEXT.
+  static void* library = dlopen("libX11-xcb.so.1", RTLD_NOW | RTLD_LOCAL);
+  static auto getConnection = library ?
+    reinterpret_cast<GetConnection>(dlsym(library, "XGetXCBConnection")) : nullptr;
+  if (!getConnection)
+  {
+    fprintf(stderr, "Linux regression hook could not resolve XGetXCBConnection\n");
+    return nullptr;
+  }
+  if (TestMode("clipboard-connection-fail"))
+  {
+    fprintf(stderr, "Injected clipboard XCB connection failure\n");
+    return nullptr;
+  }
+  return getConnection(display);
 }

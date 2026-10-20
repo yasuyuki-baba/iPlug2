@@ -97,6 +97,8 @@ public:
   void OnDisplayTimer();
   /** Called by CLAP host posix-fd callback to drain pending X11 events. */
   void ProcessX11Events();
+  /** A native close is completed by the owner after X11 dispatch returns. */
+  bool WindowCloseRequested() const { return mCloseRequested; }
 
   void PlatformResize(bool parentHasResized) override;
   void DrawResize() override;
@@ -159,14 +161,13 @@ private:
   float mHiddenCursorY = 0.f;
   Cursor mBlankCursor = 0;  // cached invisible cursor for HideMouseCursor
   bool mNeedsRedraw = false;
+  bool mCloseRequested = false;
   unsigned long mLastLeftClickTime = 0;  // X11 server timestamp of last left-button press
 
   // Clipboard atoms (interned in OpenWindow)
   Atom mClipboardAtom = 0;
   Atom mUTF8StringAtom = 0;
-  Atom mTargetsAtom = 0;
   Atom mSelDataAtom = 0;
-  WDL_String mClipboardText;  // text we own as selection provider
 
   bool mHostDriven = false;        // set true before OpenWindow when host drives the event loop
   bool mInConfigureNotify = false; // suppress PlatformResize re-entry from ConfigureNotify

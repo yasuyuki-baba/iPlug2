@@ -74,7 +74,7 @@ static bool Run(Display* display, const char* app, const char* hooks, const char
     const std::string preload = std::string(hooks) + (existing ? ":" + std::string(existing) : "");
     if (setenv("XDG_CONFIG_HOME", directory, 1) ||
         setenv("LD_PRELOAD", preload.c_str(), 1) ||
-        setenv("IPLUG_LINUX_TEST_MODE", mode, 1))
+        setenv("IPLUG_LINUX_TEST_MODE", strcmp(mode, "close-fail") == 0 ? "timer-fail" : mode, 1))
       _exit(127);
     execl(app, app, "--no-io", nullptr);
     _exit(127);
@@ -86,7 +86,8 @@ static bool Run(Display* display, const char* app, const char* hooks, const char
     return false;
   }
 
-  const bool expectFailure = strcmp(mode, "timer-fail") == 0 || strcmp(mode, "window-fail") == 0;
+  const bool expectFailure = strcmp(mode, "timer-fail") == 0 || strcmp(mode, "window-fail") == 0 ||
+    strcmp(mode, "close-fail") == 0;
   bool rendered = false;
   bool closeSent = false;
   bool exited = false;
@@ -101,11 +102,19 @@ static bool Run(Display* display, const char* app, const char* hooks, const char
     }
     if (!expectFailure && !closeSent)
     {
+      const bool idleProbe = strcmp(mode, "idle") == 0 || strcmp(mode, "close-order") == 0;
       const Window window = FindWindow(display, DefaultRootWindow(display));
       const Window editor = window ? FindEditor(display, window) : 0;
       if (editor && IsRendered(display, editor))
       {
         rendered = true;
+        if (idleProbe)
+          std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        if (strcmp(mode, "close-order") == 0)
+        {
+          SendNativeClose(display, editor);
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
         CloseWindow(display, window);
         closeSent = true;
       }
@@ -133,6 +142,14 @@ static bool Run(Display* display, const char* app, const char* hooks, const char
     passed &= log.find("Could not start Linux graphics timer") != std::string::npos;
   if (strcmp(mode, "timer-early") == 0)
     passed &= log.find("Injected early graphics timer scheduling") != std::string::npos;
+  if (strcmp(mode, "idle") == 0)
+  {
+    passed &= log.find("Linux idle probe: main=1") != std::string::npos;
+    passed &= log.find("Linux idle message: main=1") != std::string::npos;
+    passed &= log.find("wrong-thread=0") != std::string::npos;
+  }
+  if (strcmp(mode, "idle") == 0 || strcmp(mode, "close-order") == 0 || strcmp(mode, "close-fail") == 0)
+    passed &= log.find("Linux close probe: opens=1 closes=1 errors=0") != std::string::npos;
   printf("%s: %s\n%s", mode, passed ? "PASS" : "FAIL", log.c_str());
   if (!passed)
     fprintf(stderr, "exited=%d status=%d rendered=%d\n", exited, status, rendered);

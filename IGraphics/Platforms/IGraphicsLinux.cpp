@@ -16,12 +16,15 @@
 #include <cstdlib>
 #include <cstdio>
 #include <dlfcn.h>
+#include <poll.h>
+#include <cerrno>
 // Fontconfig is loaded via dlopen so the plugin works without it installed.
 // Only the font-by-name lookup (LoadPlatformFont) needs it; embedded fonts work regardless.
 
 // X11 headers first — they define macros (None, Bool, True, False, Status, Complex...)
 // that conflict with C++ identifiers. IGraphicsLinux.h undefines them.
 #include <X11/Xlib.h>
+#include <X11/Xlib-xcb.h>
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
 #include <X11/Xatom.h>
@@ -50,6 +53,184 @@ using namespace igraphics;
 
 // Timer interval in microseconds (60 fps = ~16667 us)
 static constexpr int TIMER_INTERVAL_US = 16667;
+
+namespace
+{
+class LinuxClipboard
+{
+public:
+  ~LinuxClipboard()
+  {
+    mRunning = false;
+    if (mThread)
+      pthread_join(mThread, nullptr);
+    if (mDisplay)
+    {
+      XDestroyWindow(mDisplay, mWindow);
+      XCloseDisplay(mDisplay);
+    }
+  }
+
+  bool SetText(const char* text, const char* displayName)
+  {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (!mDisplay)
+    {
+      mDisplay = XOpenDisplay(displayName);
+      if (!mDisplay)
+      {
+        fprintf(stderr, "Could not open the X11 clipboard display\n");
+        return false;
+      }
+      mConnection = XGetXCBConnection(mDisplay);
+      if (!mConnection)
+      {
+        fprintf(stderr, "Could not access the XCB clipboard connection\n");
+        XCloseDisplay(mDisplay);
+        mDisplay = nullptr;
+        return false;
+      }
+      mWindow = XCreateSimpleWindow(mDisplay, DefaultRootWindow(mDisplay),
+                                    0, 0, 1, 1, 0, 0, 0);
+      mClipboard = XInternAtom(mDisplay, "CLIPBOARD", 0);
+      mUTF8 = XInternAtom(mDisplay, "UTF8_STRING", 0);
+      mTargets = XInternAtom(mDisplay, "TARGETS", 0);
+      mRunning = true;
+      const int error = pthread_create(&mThread, nullptr, Run, this);
+      if (error)
+      {
+        fprintf(stderr, "Could not start the X11 clipboard service: %s\n", strerror(error));
+        mRunning = false;
+        mThread = 0;
+        XDestroyWindow(mDisplay, mWindow);
+        XCloseDisplay(mDisplay);
+        mDisplay = nullptr;
+        mConnection = nullptr;
+        return false;
+      }
+    }
+    if (strcmp(DisplayString(mDisplay), displayName) != 0)
+    {
+      fprintf(stderr, "The clipboard service is already connected to another X11 display\n");
+      return false;
+    }
+    mText.Set(text);
+    XSetSelectionOwner(mDisplay, mClipboard, mWindow, 0);
+    XSync(mDisplay, 0);
+    return XGetSelectionOwner(mDisplay, mClipboard) == mWindow;
+  }
+
+  bool GetOwnedText(Window owner, const char* displayName, WDL_String& text)
+  {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (!mDisplay || owner != mWindow || strcmp(DisplayString(mDisplay), displayName) != 0)
+      return false;
+    text.Set(mText.Get());
+    return true;
+  }
+
+private:
+  static void* Run(void* context)
+  {
+    auto* self = static_cast<LinuxClipboard*>(context);
+    while (self->mRunning)
+    {
+      {
+        std::lock_guard<std::mutex> lock(self->mMutex);
+        while (XPending(self->mDisplay))
+        {
+          XEvent event;
+          XNextEvent(self->mDisplay, &event);
+          if (event.type == SelectionRequest)
+            self->Reply(event.xselectionrequest);
+          else if (event.type == SelectionClear &&
+                   XGetSelectionOwner(self->mDisplay, self->mClipboard) != self->mWindow)
+            self->mText.Set("");
+        }
+      }
+      pollfd fd {XConnectionNumber(self->mDisplay), POLLIN, 0};
+      const int result = poll(&fd, 1, 20);
+      if (result < 0 && errno != EINTR)
+      {
+        fprintf(stderr, "Could not poll the X11 clipboard display: %s\n", strerror(errno));
+        break;
+      }
+    }
+    return nullptr;
+  }
+
+  void Reply(const XSelectionRequestEvent& request)
+  {
+    XFlush(mDisplay);
+    xcb_selection_notify_event_t response {};
+    response.response_type = XCB_SELECTION_NOTIFY;
+    response.requestor = request.requestor;
+    response.selection = request.selection;
+    response.target = request.target;
+    response.time = request.time;
+    const Atom property = request.property ? request.property : request.target;
+    if (request.target == mTargets)
+    {
+      const xcb_atom_t targets[] = {static_cast<xcb_atom_t>(mTargets),
+                                   static_cast<xcb_atom_t>(mUTF8), XCB_ATOM_STRING};
+      if (!CheckReply(xcb_change_property_checked(mConnection, XCB_PROP_MODE_REPLACE,
+                          request.requestor, property, XCB_ATOM_ATOM, 32, 3, targets),
+                      "property write"))
+        return;
+      response.property = property;
+    }
+    else if (request.target == mUTF8 || request.target == XA_STRING)
+    {
+      if (!CheckReply(xcb_change_property_checked(mConnection, XCB_PROP_MODE_REPLACE,
+                          request.requestor, property, request.target, 8,
+                          mText.GetLength(), mText.Get()), "property write"))
+        return;
+      response.property = property;
+    }
+    char event[32] {};
+    static_assert(sizeof(response) <= sizeof(event), "X11 selection event must fit the wire event");
+    memcpy(event, &response, sizeof(response));
+    CheckReply(xcb_send_event_checked(mConnection, 0, request.requestor, XCB_EVENT_MASK_NO_EVENT, event),
+               "selection notification");
+  }
+
+  bool CheckReply(xcb_void_cookie_t cookie, const char* operation)
+  {
+    xcb_generic_error_t* error = xcb_request_check(mConnection, cookie);
+    if (error)
+    {
+      fprintf(stderr, "X11 clipboard %s failed (error %u, resource 0x%x)\n",
+              operation, error->error_code, error->resource_id);
+      free(error);
+      return false;
+    }
+    if (xcb_connection_has_error(mConnection))
+    {
+      fprintf(stderr, "The XCB clipboard connection failed during %s\n", operation);
+      return false;
+    }
+    return true;
+  }
+
+  Display* mDisplay = nullptr;
+  xcb_connection_t* mConnection = nullptr;
+  Window mWindow = 0;
+  Atom mClipboard = 0;
+  Atom mUTF8 = 0;
+  Atom mTargets = 0;
+  WDL_String mText;
+  std::mutex mMutex;
+  std::atomic<bool> mRunning {false};
+  pthread_t mThread = 0;
+};
+
+static LinuxClipboard& GetLinuxClipboard()
+{
+  // A separate connection serves selections even while the host UI thread waits for a paste.
+  static LinuxClipboard clipboard;
+  return clipboard;
+}
+}
 
 // ---- Font helpers -----------------------------------------------------------
 
@@ -496,6 +677,9 @@ static Fontconfig* LoadFontconfig()
 IGraphicsLinux::IGraphicsLinux(IGEditorDelegate& dlg, int w, int h, int fps, float scale)
 : IGRAPHICS_DRAW_CLASS(dlg, w, h, fps, scale)
 {
+#if defined VST3_API || defined VST3C_API || defined CLAP_API
+  mHostDriven = true;
+#endif
   // Required before any Xlib calls from multiple threads
   XInitThreads();
 }
@@ -509,6 +693,8 @@ static int sIgnoreX11Error(Display*, XErrorEvent*) { return 0; }
 
 void* IGraphicsLinux::OpenWindow(void* pParent)
 {
+  StopTimer();
+  mCloseRequested = false;
   mDisplay = XOpenDisplay(nullptr);
   if (!mDisplay)
     return nullptr;
@@ -631,7 +817,6 @@ void* IGraphicsLinux::OpenWindow(void* pParent)
   mWMDeleteMessage  = XInternAtom(mDisplay, "WM_DELETE_WINDOW",  0 /* False */);
   mClipboardAtom    = XInternAtom(mDisplay, "CLIPBOARD",         0 /* False */);
   mUTF8StringAtom   = XInternAtom(mDisplay, "UTF8_STRING",       0 /* False */);
-  mTargetsAtom      = XInternAtom(mDisplay, "TARGETS",           0 /* False */);
   mSelDataAtom      = XInternAtom(mDisplay, "IPLUG2_SEL_DATA",   0 /* False */);
 
   // WM protocols and size hints are only appropriate for top-level windows.
@@ -686,20 +871,18 @@ void* IGraphicsLinux::OpenWindow(void* pParent)
   // Expose event arrives before the initial frame.
   mNeedsRedraw = true;
   if (!StartTimer())
-  {
-    CloseWindow();
     return nullptr;
-  }
 
   return (void*)(uintptr_t)mPlugWnd;
 }
 
 void IGraphicsLinux::CloseWindow()
 {
+  StopTimer();
   if (!mDisplay)
     return;
 
-  StopTimer();
+  ActivateGLContext();
   OnViewDestroyed();
 
 #ifdef IGRAPHICS_GL
@@ -1151,11 +1334,8 @@ bool IGraphicsLinux::GetTextFromClipboard(WDL_String& str)
     return false;
 
   const Window owner = XGetSelectionOwner(mDisplay, mClipboardAtom);
-  if (owner == mPlugWnd)
-  {
-    str.Set(mClipboardText.Get());
+  if (GetLinuxClipboard().GetOwnedText(owner, DisplayString(mDisplay), str))
     return true;
-  }
   if (!owner)
     return false;
 
@@ -1210,10 +1390,7 @@ bool IGraphicsLinux::SetTextInClipboard(const char* str)
   if (!mDisplay || !mPlugWnd || !mClipboardAtom)
     return false;
 
-  mClipboardText.Set(str);
-  XSetSelectionOwner(mDisplay, mClipboardAtom, mPlugWnd, 0L /* CurrentTime */);
-  XFlush(mDisplay);
-  return XGetSelectionOwner(mDisplay, mClipboardAtom) == mPlugWnd;
+  return GetLinuxClipboard().SetText(str, DisplayString(mDisplay));
 }
 
 // State passed through GTK menu-item activation callbacks.
@@ -1612,7 +1789,7 @@ static int KeysymToVK(KeySym ks)
 
 void IGraphicsLinux::ProcessX11Events()
 {
-  if (!mDisplay || !mPlugWnd)
+  if (!mDisplay || !mPlugWnd || mCloseRequested)
     return;
 
   const float scale = GetTotalScale();
@@ -1808,52 +1985,15 @@ void IGraphicsLinux::ProcessX11Events()
 
       case ClientMessage:
       {
-        if ((Atom)ev.xclient.data.l[0] == mWMDeleteMessage)
-          CloseWindow();
+        if (ev.xclient.message_type == XInternAtom(mDisplay, "WM_PROTOCOLS", 0) &&
+            ev.xclient.format == 32 && (Atom)ev.xclient.data.l[0] == mWMDeleteMessage)
+        {
+          mCloseRequested = true;
+          mTimerRunning = false;
+          return;
+        }
         break;
       }
-
-      // Another app is asking us to hand over our clipboard contents
-      case SelectionRequest:
-      {
-        XSelectionRequestEvent& req = ev.xselectionrequest;
-        XEvent resp = {};
-        resp.xselection.type      = SelectionNotify;
-        resp.xselection.display   = mDisplay;
-        resp.xselection.requestor = req.requestor;
-        resp.xselection.selection = req.selection;
-        resp.xselection.target    = req.target;
-        resp.xselection.time      = req.time;
-
-        if (req.target == mTargetsAtom)
-        {
-          Atom targets[] = { mTargetsAtom, mUTF8StringAtom, XA_STRING };
-          XChangeProperty(mDisplay, req.requestor, req.property, XA_ATOM, 32,
-                          PropModeReplace, (unsigned char*)targets, 3);
-          resp.xselection.property = req.property;
-        }
-        else if (req.target == mUTF8StringAtom || req.target == XA_STRING)
-        {
-          XChangeProperty(mDisplay, req.requestor, req.property, req.target, 8,
-                          PropModeReplace,
-                          (unsigned char*)mClipboardText.Get(),
-                          mClipboardText.GetLength());
-          resp.xselection.property = req.property;
-        }
-        else
-        {
-          resp.xselection.property = 0 /* None */;
-        }
-        XSendEvent(mDisplay, req.requestor, 0 /* False */, 0, &resp);
-        XFlush(mDisplay);
-        break;
-      }
-
-      // We've lost clipboard ownership; discard our stored text
-      case SelectionClear:
-        if (XGetSelectionOwner(mDisplay, mClipboardAtom) != mPlugWnd)
-          mClipboardText.Set("");
-        break;
 
       default:
         break;
@@ -1893,9 +2033,9 @@ bool IGraphicsLinux::StartTimer()
 
 void IGraphicsLinux::StopTimer()
 {
-  if (mTimerRunning)
+  mTimerRunning = false;
+  if (mTimerThread && !pthread_equal(mTimerThread, pthread_self()))
   {
-    mTimerRunning = false;
     pthread_join(mTimerThread, nullptr);
     mTimerThread = 0;
   }
@@ -1903,15 +2043,16 @@ void IGraphicsLinux::StopTimer()
 
 void IGraphicsLinux::OnDisplayTimer()
 {
-  if (!mDisplay || !mPlugWnd)
-    return;
-
   // Teardown joins this timer while holding GfxMutex; skip busy frames instead of waiting.
   std::unique_lock<std::recursive_mutex> lock(GetDelegate()->GfxMutex(), std::try_to_lock);
   if (!lock.owns_lock())
     return;
+  if (!mDisplay || !mPlugWnd || mCloseRequested)
+    return;
 
   ProcessX11Events();
+  if (!mDisplay || !mPlugWnd || mCloseRequested)
+    return;
 
   IRECTList rects;
   if (mNeedsRedraw || IsDirty(rects))

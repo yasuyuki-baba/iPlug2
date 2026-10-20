@@ -60,7 +60,19 @@ IPlugCLAP::IPlugCLAP(const InstanceInfo& info, const Config& config)
   mAudioIO64.Resize(nChans);
   
   SetHost(info.mHost->name, version);
+#ifndef OS_LINUX
   CreateTimer();
+#endif
+}
+
+IPlugCLAP::~IPlugCLAP()
+{
+#ifdef OS_LINUX
+  mTimer.reset();
+#ifndef NO_IGRAPHICS
+  mLinuxGuiTimer.reset();
+#endif
+#endif
 }
 
 uint32_t IPlugCLAP::tailGet() const noexcept
@@ -157,7 +169,18 @@ bool IPlugCLAP::SendSysEx(const ISysEx& msg)
 bool IPlugCLAP::init() noexcept
 {
   SetDefaultConfig();
-  
+
+#ifdef OS_LINUX
+  mTimer.reset(Timer::Create([this](Timer&) {
+    if (!mLinuxIdlePending.exchange(true))
+      _host.requestCallback();
+  }, IDLE_TIMER_RATE));
+  if (!mTimer)
+  {
+    fprintf(stderr, "Could not start the CLAP idle callback timer\n");
+    return false;
+  }
+#endif
   return true;
 }
 
@@ -1203,7 +1226,10 @@ void IPlugCLAP::onTimer(clap_id timerId) noexcept
 {
   if (mGUIOpen && timerId != CLAP_INVALID_ID && timerId == mLinuxTimerId)
     if (auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI()))
+    {
       pGraphics->OnDisplayTimer();
+      CheckLinuxGuiClosed();
+    }
 }
 
 void IPlugCLAP::onPosixFd(int fd, clap_posix_fd_flags_t flags) noexcept
@@ -1213,14 +1239,38 @@ void IPlugCLAP::onPosixFd(int fd, clap_posix_fd_flags_t flags) noexcept
     std::lock_guard<std::recursive_mutex> lock(GfxMutex());
     if (auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI()))
       pGraphics->ProcessX11Events();
+    CheckLinuxGuiClosed();
   }
 }
 
+#endif
+
+#if defined OS_LINUX
 void IPlugCLAP::onMainThread() noexcept
 {
+  if (mLinuxIdlePending.exchange(false))
+    OnTimer();
+#ifndef NO_IGRAPHICS
   if (mLinuxCallbackPending.exchange(false) && mGUIOpen)
     if (auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI()))
+    {
       pGraphics->OnDisplayTimer();
+      CheckLinuxGuiClosed();
+    }
+#endif
+}
+#endif
+
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+void IPlugCLAP::CheckLinuxGuiClosed() noexcept
+{
+  auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI());
+  if (!pGraphics || pGraphics->WindowCloseRequested() || !pGraphics->WindowIsOpen())
+  {
+    UnregisterLinuxHostCallbacks();
+    mGUIOpen = false;
+    CloseWindowIfRequested();
+  }
 }
 
 bool IPlugCLAP::RegisterLinuxHostCallbacks() noexcept

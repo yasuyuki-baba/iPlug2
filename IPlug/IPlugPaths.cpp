@@ -20,6 +20,7 @@
 #if defined OS_WEB
 #include <emscripten/val.h>
 #elif defined OS_LINUX
+#include <cerrno>
 #include <unistd.h>
 #include <climits>
 #include <dlfcn.h>
@@ -304,21 +305,37 @@ EResourceLocation LocateResource(const char* name, const char* type, WDL_String&
   // This correctly handles VST3/CLAP plugins loaded into a host — /proc/self/exe would
   // give the host's path, not the plugin's.
   Dl_info dlInfo = {};
-  if (dladdr((void*)LocateResource, &dlInfo) && dlInfo.dli_fname)
+  const bool moduleLocated = dladdr((void*)LocateResource, &dlInfo) && dlInfo.dli_fname;
+  if (moduleLocated)
   {
-    WDL_String soDir;
-    soDir.Set(dlInfo.dli_fname);
-    soDir.remove_filepart(true); // keep trailing slash
+    WDL_String modulePath;
+    char resolvedPath[PATH_MAX];
+    if (realpath(dlInfo.dli_fname, resolvedPath))
+      modulePath.Set(resolvedPath);
+    else
+    {
+      fprintf(stderr, "Could not resolve resource module path '%s': %s\n",
+              dlInfo.dli_fname, strerror(errno));
+      modulePath.Set(dlInfo.dli_fname);
+    }
 
-    // Try <so_dir>/resources/<type>/<filename>  (APP, flat CLAP layout)
-    candidate.SetFormatted(PATH_MAX, "%sresources/%s/%s", soDir.Get(), type, fileNameOnly);
+    candidate.SetFormatted(PATH_MAX, "%s.resources/%s/%s", modulePath.Get(), type, fileNameOnly);
     if (stat(candidate.Get(), &st) == 0)
     {
       result.Set(candidate.Get());
       return EResourceLocation::kAbsolutePath;
     }
 
-    // Try <so_dir>/../Resources/<type>/<filename>  (VST3 bundle: Contents/arch-linux/ -> Contents/Resources/)
+    candidate.SetFormatted(PATH_MAX, "%s.resources/%s", modulePath.Get(), fileNameOnly);
+    if (stat(candidate.Get(), &st) == 0)
+    {
+      result.Set(candidate.Get());
+      return EResourceLocation::kAbsolutePath;
+    }
+
+#if defined VST3_API || defined VST3C_API || defined VST3P_API
+    WDL_String soDir(modulePath.Get());
+    soDir.remove_filepart(true);
     candidate.SetFormatted(PATH_MAX, "%s../Resources/%s/%s", soDir.Get(), type, fileNameOnly);
     if (stat(candidate.Get(), &st) == 0)
     {
@@ -326,41 +343,29 @@ EResourceLocation LocateResource(const char* name, const char* type, WDL_String&
       return EResourceLocation::kAbsolutePath;
     }
 
-    // Try <so_dir>/../Resources/<filename>
     candidate.SetFormatted(PATH_MAX, "%s../Resources/%s", soDir.Get(), fileNameOnly);
     if (stat(candidate.Get(), &st) == 0)
     {
       result.Set(candidate.Get());
       return EResourceLocation::kAbsolutePath;
     }
-
-    // Try <so_dir>/resources/<filename>
-    candidate.SetFormatted(PATH_MAX, "%sresources/%s", soDir.Get(), fileNameOnly);
-    if (stat(candidate.Get(), &st) == 0)
-    {
-      result.Set(candidate.Get());
-      return EResourceLocation::kAbsolutePath;
-    }
+#endif
   }
 
-  // Fallback: look next to the host executable (covers cases where dladdr is unavailable)
+  // Only use the executable fallback when the module could not be identified.
   char buf[PATH_MAX];
-  ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  ssize_t len = moduleLocated ? -1 : readlink("/proc/self/exe", buf, sizeof(buf) - 1);
   if (len > 0)
   {
     buf[len] = '\0';
-    WDL_String exePath;
-    exePath.Set(buf);
-    exePath.remove_filepart(true);
-
-    candidate.SetFormatted(PATH_MAX, "%sresources/%s/%s", exePath.Get(), type, fileNameOnly);
+    candidate.SetFormatted(PATH_MAX, "%s.resources/%s/%s", buf, type, fileNameOnly);
     if (stat(candidate.Get(), &st) == 0)
     {
       result.Set(candidate.Get());
       return EResourceLocation::kAbsolutePath;
     }
 
-    candidate.SetFormatted(PATH_MAX, "%sresources/%s", exePath.Get(), fileNameOnly);
+    candidate.SetFormatted(PATH_MAX, "%s.resources/%s", buf, fileNameOnly);
     if (stat(candidate.Get(), &st) == 0)
     {
       result.Set(candidate.Get());

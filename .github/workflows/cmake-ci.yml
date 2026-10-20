@@ -897,6 +897,8 @@ jobs:
             libpulse-dev \
             libgl-dev \
             libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
             libxi-dev \
             libxext-dev \
             libxrender-dev \
@@ -947,7 +949,7 @@ jobs:
         run: |
           cmake --build build/linux-regression --parallel 2 \
             --target IPlugEffect-app LinuxGuiTest LinuxStartupHooks \
-            LinuxDialogTest LinuxRuntimeTest LinuxClapHostTest
+            LinuxDialogTest LinuxRuntimeTest LinuxClapHostTest LinuxVst3HostTest
 
       - name: Run Linux regression tests
         run: ctest --test-dir build/linux-regression --output-on-failure
@@ -989,6 +991,8 @@ jobs:
             libpulse-dev \
             libgl-dev \
             libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
             libxi-dev \
             libxext-dev \
             libxrender-dev \

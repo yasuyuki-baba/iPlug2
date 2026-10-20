@@ -86,8 +86,7 @@ function(_iplug_add_resources target resources)
   )
   if(UNIX AND NOT APPLE)
     # On Linux: copy resources so that IPlugPaths.cpp's LocateResource can find them.
-    #   APP (EXECUTABLE)       -> <bindir>/resources/<type>/<file>
-    #   CLAP (SHARED_LIBRARY, flat)   -> <libdir>/resources/<type>/<file>
+    #   Flat APP/CLAP targets -> <target-file>.resources/<type>/<file>
     #   VST3 (SHARED_LIBRARY, bundle) -> <libdir>/../Resources/<type>/<file>
     #                                    (i.e. Contents/Resources/ in the bundle)
     get_target_property(_target_type ${target} TYPE)
@@ -113,13 +112,14 @@ function(_iplug_add_resources target resources)
           set(_res_dest "${_outdir}/../Resources/${_type}/${_filename}")
           set(_res_dir  "${_outdir}/../Resources/${_type}")
         else()
-          set(_res_dest "${_outdir}/resources/${_type}/${_filename}")
-          set(_res_dir  "${_outdir}/resources/${_type}")
+          set(_res_dest "$<TARGET_FILE:${target}>.resources/${_type}/${_filename}")
+          set(_res_dir  "$<TARGET_FILE:${target}>.resources/${_type}")
         endif()
         add_custom_command(TARGET ${target} POST_BUILD
           COMMAND ${CMAKE_COMMAND} -E make_directory "${_res_dir}"
           COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_abs_res}" "${_res_dest}"
-          COMMENT "Copying resource ${_filename} -> ${_res_dest}"
+          COMMENT "Copying resource ${_filename} for ${target}"
+          VERBATIM
         )
       endforeach()
     endif()

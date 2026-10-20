@@ -9,16 +9,26 @@
 */
 
 #pragma once
+#include <algorithm>
+#include <cstdio>
 #include "base/source/fstring.h"
 #include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
 #include "pluginterfaces/base/keycodes.h"
 
 #include "IPlugStructs.h"
 
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+#include "IGraphicsLinux.h"
+#endif
+
 /** IPlug VST3 View  */
 template <class T>
 class IPlugVST3View : public Steinberg::CPluginView
                     , public Steinberg::IPlugViewContentScaleSupport
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+                    , public Steinberg::Linux::ITimerHandler
+                    , public Steinberg::Linux::IEventHandler
+#endif
 {
 public:
   IPlugVST3View(T& owner)
@@ -29,6 +39,11 @@ public:
   
   ~IPlugVST3View()
   {
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+    StopLinuxRunLoop();
+    if (mLinuxAttached)
+      mOwner.CloseWindow();
+#endif
     mOwner.release();
   }
   
@@ -126,7 +141,22 @@ public:
         return Steinberg::kResultFalse;
 #elif defined OS_LINUX
       if (strcmp(type, Steinberg::kPlatformTypeX11EmbedWindowID) == 0)
-        mOwner.OpenWindow(pParent);
+      {
+#ifndef NO_IGRAPHICS
+        if (mLinuxAttached || !FindLinuxRunLoop())
+          return Steinberg::kResultFalse;
+        if (!mOwner.OpenWindow(pParent) || !StartLinuxRunLoop())
+        {
+          StopLinuxRunLoop();
+          mOwner.CloseWindow();
+          return Steinberg::kResultFalse;
+        }
+        mLinuxAttached = true;
+#else
+        if (!mOwner.OpenWindow(pParent))
+          return Steinberg::kResultFalse;
+#endif
+      }
       else
         return Steinberg::kResultFalse;
 #endif
@@ -138,6 +168,10 @@ public:
     
   Steinberg::tresult PLUGIN_API removed() override
   {
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+    StopLinuxRunLoop();
+    mLinuxAttached = false;
+#endif
     if (mOwner.HasUI())
       mOwner.CloseWindow();
     
@@ -155,6 +189,10 @@ public:
 
   Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override
   {
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+    QUERY_INTERFACE(_iid, obj, Steinberg::Linux::ITimerHandler::iid, Steinberg::Linux::ITimerHandler)
+    QUERY_INTERFACE(_iid, obj, Steinberg::Linux::IEventHandler::iid, Steinberg::Linux::IEventHandler)
+#endif
     QUERY_INTERFACE(_iid, obj, IPlugViewContentScaleSupport::iid, IPlugViewContentScaleSupport)
     *obj = 0;
     return CPluginView::queryInterface(_iid, obj);
@@ -212,6 +250,47 @@ public:
   }
   
   DELEGATE_REFCOUNT(Steinberg::CPluginView)
+
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+  Steinberg::tresult PLUGIN_API setFrame(Steinberg::IPlugFrame* frame) override
+  {
+    StopLinuxRunLoop();
+    CPluginView::setFrame(frame);
+    if (mLinuxAttached && (!FindLinuxRunLoop() || !StartLinuxRunLoop()))
+    {
+      StopLinuxRunLoop();
+      mOwner.CloseWindow();
+      mLinuxAttached = false;
+      return Steinberg::kResultFalse;
+    }
+    return Steinberg::kResultTrue;
+  }
+
+  void PLUGIN_API onTimer() override
+  {
+    Steinberg::IPtr<IPlugVST3View> keepAlive(this);
+    if (mLinuxTimerActive)
+      if (auto* graphics = static_cast<iplug::igraphics::IGraphicsLinux*>(mOwner.GetUI()))
+      {
+        graphics->OnDisplayTimer();
+        CheckLinuxWindowClosed();
+      }
+  }
+
+  void PLUGIN_API onFDIsSet(Steinberg::Linux::FileDescriptor fd) override
+  {
+    if (fd == mLinuxFd && fd >= 0)
+    {
+      Steinberg::IPtr<IPlugVST3View> keepAlive(this);
+      std::lock_guard<std::recursive_mutex> lock(mOwner.GfxMutex());
+      if (auto* graphics = static_cast<iplug::igraphics::IGraphicsLinux*>(mOwner.GetUI()))
+      {
+        graphics->ProcessX11Events();
+        CheckLinuxWindowClosed();
+      }
+    }
+  }
+#endif
   
 #pragma mark -
   
@@ -353,4 +432,70 @@ public:
   }
 
   T& mOwner;
+
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+private:
+  void CheckLinuxWindowClosed()
+  {
+    auto* graphics = static_cast<iplug::igraphics::IGraphicsLinux*>(mOwner.GetUI());
+    if (graphics && (graphics->WindowCloseRequested() || !graphics->WindowIsOpen()))
+    {
+      StopLinuxRunLoop();
+      mLinuxAttached = false;
+      mOwner.CloseWindow();
+    }
+  }
+
+  bool FindLinuxRunLoop()
+  {
+    mLinuxRunLoop = Steinberg::FUnknownPtr<Steinberg::Linux::IRunLoop>(plugFrame);
+    if (!mLinuxRunLoop)
+      mLinuxRunLoop = Steinberg::FUnknownPtr<Steinberg::Linux::IRunLoop>(mOwner.getHostContext());
+    if (!mLinuxRunLoop)
+      fprintf(stderr, "The VST3 host must provide IRunLoop for the Linux editor\n");
+    return mLinuxRunLoop && mOwner.EnsureLinuxIdleTimer(mLinuxRunLoop);
+  }
+
+  bool StartLinuxRunLoop()
+  {
+    auto* graphics = static_cast<iplug::igraphics::IGraphicsLinux*>(mOwner.GetUI());
+    if (!graphics || !graphics->WindowIsOpen())
+      return false;
+    const auto interval = std::max<Steinberg::Linux::TimerInterval>(1, 1000 / graphics->FPS());
+    if (mLinuxRunLoop->registerTimer(this, interval) != Steinberg::kResultOk)
+    {
+      fprintf(stderr, "The VST3 host rejected the Linux editor timer\n");
+      return false;
+    }
+    mLinuxTimerActive = true;
+    const int fd = graphics->GetX11Fd();
+    if (fd >= 0 && mLinuxRunLoop->registerEventHandler(this, fd) == Steinberg::kResultOk)
+      mLinuxFd = fd;
+    else
+      fprintf(stderr, "The VST3 host rejected the X11 descriptor; polling on GUI ticks\n");
+    return true;
+  }
+
+  void StopLinuxRunLoop()
+  {
+    if (mLinuxTimerActive)
+    {
+      mLinuxTimerActive = false;
+      if (mLinuxRunLoop->unregisterTimer(this) != Steinberg::kResultOk)
+        fprintf(stderr, "Could not unregister the VST3 editor timer\n");
+    }
+    if (mLinuxFd >= 0)
+    {
+      mLinuxFd = -1;
+      if (mLinuxRunLoop->unregisterEventHandler(this) != Steinberg::kResultOk)
+        fprintf(stderr, "Could not unregister the VST3 X11 descriptor\n");
+    }
+    mLinuxRunLoop = nullptr;
+  }
+
+  Steinberg::IPtr<Steinberg::Linux::IRunLoop> mLinuxRunLoop;
+  bool mLinuxAttached = false;
+  bool mLinuxTimerActive = false;
+  int mLinuxFd = -1;
+#endif
 };

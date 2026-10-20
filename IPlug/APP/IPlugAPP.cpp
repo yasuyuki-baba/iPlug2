@@ -10,6 +10,7 @@
 
 #include "IPlugAPP.h"
 #include "IPlugAPP_host.h"
+#include <cstdio>
 
 #if defined OS_MAC || defined OS_LINUX
 #include <IPlugSWELL.h>
@@ -20,6 +21,57 @@ extern float GetScaleForHWND(HWND hWnd);
 using namespace iplug;
 
 extern HWND gHWND;
+
+#ifdef OS_LINUX
+namespace
+{
+class LinuxAppTimer final : public Timer
+{
+public:
+  explicit LinuxAppTimer(std::function<void()> callback)
+  : mCallback(callback)
+  {
+    mID = SetTimer(nullptr, 0, IDLE_TIMER_RATE, TimerProc);
+    if (mID)
+      sTimers.Add(this);
+    else
+      fprintf(stderr, "Could not create the standalone idle timer\n");
+  }
+
+  ~LinuxAppTimer() override { Stop(); }
+
+  void Stop() override
+  {
+    if (mID)
+    {
+      KillTimer(nullptr, mID);
+      sTimers.DeletePtr(this);
+      mID = 0;
+    }
+  }
+
+private:
+  static void TimerProc(HWND, UINT, UINT_PTR id, DWORD)
+  {
+    for (int i = 0; i < sTimers.GetSize(); ++i)
+    {
+      auto* pTimer = sTimers.Get(i);
+      if (pTimer->mID == id)
+      {
+        pTimer->mCallback();
+        return;
+      }
+    }
+  }
+
+  static WDL_PtrList<LinuxAppTimer> sTimers;
+  std::function<void()> mCallback;
+  UINT_PTR mID = 0;
+};
+
+WDL_PtrList<LinuxAppTimer> LinuxAppTimer::sTimers;
+}
+#endif
 
 IPlugAPP::IPlugAPP(const InstanceInfo& info, const Config& config)
 : IPlugAPIBase(config, kAPIAPP)
@@ -34,7 +86,16 @@ IPlugAPP::IPlugAPP(const InstanceInfo& info, const Config& config)
 
   SetBlockSize(DEFAULT_BLOCK_SIZE);
   
+#ifdef OS_LINUX
+  mTimer.reset(new LinuxAppTimer([this] {
+#ifndef NO_IGRAPHICS
+    CloseWindowIfRequested();
+#endif
+    OnTimer();
+  }));
+#else
   CreateTimer();
+#endif
 }
 
 bool IPlugAPP::EditorResize(int viewWidth, int viewHeight)

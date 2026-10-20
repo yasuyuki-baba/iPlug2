@@ -12,7 +12,7 @@
 #pragma once
 
 /** @file
- * @brief This file includes classes for implementing timers - in order to get a regular callback on the main thread
+ * @brief Platform timer primitives. Linux worker timers require explicit main-thread dispatch for UI work.
  * The interface is partially based on the api of Steinberg's timer.cpp from the VST3_SDK for compatibility,
  * base/source/timer.cpp, so thanks to them 
  * */
@@ -47,7 +47,7 @@ struct Timer
   
   using ITimerFunction = std::function<void(Timer& t)>;
 
-  /** On Linux, returns nullptr if the worker thread cannot be created. */
+  /** On Linux, callbacks run on a worker; returns nullptr if that worker cannot be created. */
   static Timer* Create(ITimerFunction func, uint32_t intervalMs);
   virtual ~Timer() {};
   virtual void Stop() = 0;

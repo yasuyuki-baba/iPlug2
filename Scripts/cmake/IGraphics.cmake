@@ -80,13 +80,15 @@ if(NOT TARGET iPlug2::IGraphics)
       "-framework QuartzCore"
     )
   elseif(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
-    find_package(X11 REQUIRED)
+    find_package(X11 REQUIRED COMPONENTS X11_xcb xcb)
     find_package(OpenGL REQUIRED)
     target_include_directories(iPlug2::IGraphics INTERFACE
       ${X11_INCLUDE_DIR}
     )
     target_link_libraries(iPlug2::IGraphics INTERFACE
       ${X11_LIBRARIES}
+      X11::X11_xcb
+      X11::xcb
       OpenGL::GL
       dl
       pthread

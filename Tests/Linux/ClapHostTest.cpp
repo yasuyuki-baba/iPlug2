@@ -184,8 +184,10 @@ int main(int argc, char** argv)
     return 1;
   const std::string mode(argv[2]);
   Host host;
-  host.offerTimer = mode != "none" && mode != "fd-only" && mode != "fallback-fail";
-  host.offerFd = mode != "none" && mode != "timer-only";
+  host.offerTimer = mode != "none" && mode != "fd-only" && mode != "fallback-fail" &&
+    mode != "native-close-fallback" && mode != "idle-none" && mode != "close-order-fallback";
+  host.offerFd = mode != "none" && mode != "timer-only" && mode != "native-close-fallback" &&
+    mode != "idle-none" && mode != "close-order-fallback" && mode != "close-order-poll";
   host.rejectTimer = mode == "timer-fail" || mode == "both-fail";
   host.rejectFd = mode == "fd-fail" || mode == "both-fail";
   void* library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
@@ -211,8 +213,27 @@ int main(int argc, char** argv)
     return 1;
   }
   const auto* descriptor = factory->get_plugin_descriptor(factory, 0);
+  const bool closeProbe = mode.compare(0, 11, "close-order") == 0;
+  const bool idleProbe = mode.compare(0, 4, "idle") == 0 || closeProbe;
+  const auto idleCount = reinterpret_cast<unsigned (*)(unsigned)>(dlsym(library, "LinuxIdleProbeCount"));
+  const auto queue = reinterpret_cast<void (*)()>(dlsym(library, "LinuxIdleProbeQueue"));
+  if (idleProbe)
+    Check(idleCount && queue, "load CLAP idle probe hooks");
+  if (mode == "idle-fail")
+    Check(setenv("IPLUG_LINUX_TEST_MODE", "core-timer-fail", 1) == 0, "inject idle timer failure");
   const auto* plugin = factory->create_plugin(factory, &host.api, descriptor->id);
-  if (!plugin || !plugin->init(plugin))
+  const bool initialized = plugin && plugin->init(plugin);
+  if (mode == "idle-fail")
+  {
+    Check(!initialized, "CLAP initialization reports idle timer failure");
+    if (plugin)
+      plugin->destroy(plugin);
+    unsetenv("IPLUG_LINUX_TEST_MODE");
+    entry->deinit();
+    dlclose(library);
+    return sFailures ? 1 : 0;
+  }
+  if (!initialized)
   {
     fprintf(stderr, "Could not initialize CLAP plugin\n");
     if (plugin)
@@ -220,6 +241,30 @@ int main(int argc, char** argv)
     entry->deinit();
     dlclose(library);
     return 1;
+  }
+  if (idleProbe)
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    Check(idleCount(0) == 0 && idleCount(2) == 0, "idle and queued UI messages wait for host dispatch");
+    Check(host.requests == 1, "headless idle callbacks are coalesced");
+    host.Pump(plugin);
+    Check(idleCount(0) > 0 && idleCount(2) > 0, "idle and UI messages run before an editor exists");
+    Check(idleCount(1) == 0, "headless idle and messages run on the main thread");
+  }
+  if (mode == "idle-headless")
+  {
+    Check(!plugin->get_extension(plugin, CLAP_EXT_GUI), "headless CLAP offers no editor");
+    queue();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    host.Pump(plugin);
+    Check(idleCount(2) >= 2 && idleCount(1) == 0, "headless CLAP keeps delivering UI messages on main");
+    plugin->destroy(plugin);
+    const unsigned stopped = host.requests;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    Check(host.requests == stopped, "headless CLAP teardown stops callback requests");
+    entry->deinit();
+    dlclose(library);
+    return sFailures ? 1 : 0;
   }
   const auto* gui = static_cast<const clap_plugin_gui_t*>(
     plugin->get_extension(plugin, CLAP_EXT_GUI));
@@ -262,9 +307,10 @@ int main(int argc, char** argv)
     const bool fallback = !host.offerTimer || host.rejectTimer;
     if (fallback)
     {
+      const unsigned beforeRequests = host.requests;
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       Check(host.requests > 0, "fallback requests main-thread callbacks");
-      Check(host.requests == 1, "fallback coalesces outstanding callbacks");
+      Check(host.requests - beforeRequests <= 2, "GUI and idle each coalesce outstanding callbacks");
     }
     for (unsigned i = 0; i < 3; ++i)
     {
@@ -273,24 +319,71 @@ int main(int argc, char** argv)
       Check(gui->hide(plugin), "hide GUI");
       host.CheckUnregistered();
       host.pending = false;
-      const unsigned stopped = host.requests;
+      const unsigned before = idleProbe ? idleCount(0) : 0;
+      const unsigned messages = idleProbe ? idleCount(2) : 0;
+      if (idleProbe)
+        queue();
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      Check(host.requests == stopped, "hidden GUI stops requesting callbacks");
       plugin->on_main_thread(plugin);
+      if (idleProbe)
+      {
+        Check(idleCount(0) > before && idleCount(2) > messages,
+              "hidden editor still receives idle and queued UI messages");
+        Check(idleCount(1) == 0, "hidden idle and messages stay on the main thread");
+      }
     }
     Check(gui->show(plugin), "reopen GUI before destroy");
     Check(host.WaitForRender(plugin, display, window), "reopened GUI renders");
+    if (mode == "native-close" || mode == "native-close-fallback" || closeProbe)
+    {
+      const Window editor = FindEditor(display, window);
+      Check(editor != 0, "find editor for native close");
+      if (editor)
+      {
+        const unsigned closes = closeProbe ? idleCount(4) : 0;
+        SendNativeClose(display, editor);
+        if (closeProbe)
+          Check(idleCount(4) == closes, "CLAP native close waits for main-thread dispatch");
+        const auto deadline = Clock::now() + std::chrono::seconds(2);
+        while (Clock::now() < deadline)
+        {
+          host.Pump(plugin);
+          if (!host.timerActive && host.fd < 0 && !FindEditor(display, window))
+            break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        host.CheckUnregistered();
+        if (closeProbe)
+        {
+          Check(idleCount(4) == closes + 1, "CLAP native close calls OnUIClose exactly once");
+          Check(idleCount(5) == 0, "CLAP OnUIClose runs on main with live controls");
+          gui->hide(plugin);
+          Check(idleCount(4) == closes + 1, "host hide after native close does not repeat OnUIClose");
+        }
+        Check(gui->show(plugin), "show editor again after native close");
+        Check(host.WaitForRender(plugin, display, window), "native-closed editor can reopen");
+      }
+    }
   }
   gui->destroy(plugin);
   host.CheckUnregistered();
   host.pending = false;
-  const unsigned stopped = host.requests;
+  const unsigned before = idleProbe ? idleCount(0) : 0;
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  Check(host.requests == stopped, "destroyed GUI stops requesting callbacks");
   plugin->on_main_thread(plugin);
+  if (idleProbe)
+  {
+    Check(idleCount(3) == idleCount(4) && idleCount(5) == 0,
+          "CLAP destroy preserves paired UI callbacks and live controls");
+    Check(idleCount(0) > before, "idle continues after GUI destruction");
+    Check(idleCount(1) == 0, "all CLAP idle and message callbacks run on the main thread");
+  }
   if (expectFailure)
     Check(unsetenv("IPLUG_LINUX_TEST_MODE") == 0, "clear fault injection");
   plugin->destroy(plugin);
+  const unsigned stopped = host.requests;
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  Check(host.requests == stopped, "plugin destruction stops all worker callback requests");
   entry->deinit();
   XDestroyWindow(display, window);
   XCloseDisplay(display);

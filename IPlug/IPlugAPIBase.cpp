@@ -66,7 +66,7 @@ void IPlugAPIBase::OnHostRequestingImportantParameters(int count, WDL_TypedBuf<i
 
 void IPlugAPIBase::CreateTimer()
 {
-  mTimer = std::unique_ptr<Timer>(Timer::Create(std::bind(&IPlugAPIBase::OnTimer, this, std::placeholders::_1), IDLE_TIMER_RATE));
+  mTimer = std::unique_ptr<Timer>(Timer::Create([this](Timer&) { OnTimer(); }, IDLE_TIMER_RATE));
 }
 
 bool IPlugAPIBase::CompareState(const uint8_t* pIncomingState, int startPos) const
@@ -142,7 +142,7 @@ void IPlugAPIBase::SendParameterValueFromAPI(int paramIdx, double value, bool no
   mParamChangeFromProcessor.PushFromArgs(paramIdx, value);
 }
 
-void IPlugAPIBase::OnTimer(Timer& t)
+void IPlugAPIBase::OnTimer()
 {
 #if defined OS_LINUX && IPLUG_EDITOR && !defined NO_IGRAPHICS
   std::lock_guard<std::recursive_mutex> gfxLock(GfxMutex());

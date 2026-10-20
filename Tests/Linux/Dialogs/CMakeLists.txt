@@ -19,7 +19,8 @@ target_link_libraries(LinuxRuntimeTest PRIVATE iPlug2::IGraphics::NanoVG::GL3)
 target_compile_definitions(LinuxRuntimeTest PRIVATE IPLUG_EDITOR=1 IPLUG_DSP=0)
 set_target_properties(LinuxRuntimeTest PROPERTIES ENABLE_EXPORTS ON)
 
-foreach(mode close clipboard core-timer core-timer-early core-timer-fail)
+foreach(mode close native-close host-native-close clipboard clipboard-instances clipboard-fail
+  clipboard-disappearing clipboard-host-handler core-timer core-timer-early core-timer-fail)
   add_test(NAME linux-${mode}
     COMMAND "${XVFB_RUN}" -a "$<TARGET_FILE:LinuxRuntimeTest>" "${mode}")
   set_tests_properties(linux-${mode} PROPERTIES TIMEOUT 15

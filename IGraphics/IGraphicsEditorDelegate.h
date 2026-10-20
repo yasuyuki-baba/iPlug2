@@ -94,6 +94,9 @@ public:
   int UnserializeEditorSize(const IByteChunk& chunk, int startPos);
     
 #ifdef OS_LINUX
+  /** Complete a pending native close on the owner's main thread, outside graphics dispatch. */
+  bool CloseWindowIfRequested();
+
   /** Mutex protecting mGraphics access from concurrent threads on Linux.
    *  The host may call SendParameterValueFromDelegate, CloseWindow, etc.
    *  from any thread while the timer/draw thread is running. Recursive

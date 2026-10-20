@@ -84,6 +84,7 @@ class IPlugCLAP : public IPlugAPIBase
   
 public:
   IPlugCLAP(const InstanceInfo& info, const Config& config);
+  ~IPlugCLAP() override;
 
   // IPlugAPIBase
   void BeginInformHostOfParamChange(int idx) override;
@@ -176,15 +177,20 @@ private:
   // Helper to attach GUI Windows
   bool GUIWindowAttach(void* parent) noexcept;
 
+#if defined OS_LINUX
+  void onMainThread() noexcept override;
+  std::atomic<bool> mLinuxIdlePending{false};
+#endif
+
 #if defined OS_LINUX && !defined NO_IGRAPHICS
   // clap_plugin_timer_support + clap_plugin_posix_fd_support (Linux only)
   bool implementsTimerSupport() const noexcept override { return true; }
   void onTimer(clap_id timerId) noexcept override;
   bool implementsPosixFdSupport() const noexcept override { return true; }
   void onPosixFd(int fd, clap_posix_fd_flags_t flags) noexcept override;
-  void onMainThread() noexcept override;
   bool RegisterLinuxHostCallbacks() noexcept;
   void UnregisterLinuxHostCallbacks() noexcept;
+  void CheckLinuxGuiClosed() noexcept;
   clap_id mLinuxTimerId = CLAP_INVALID_ID;
   int mLinuxFd = -1;
   std::unique_ptr<Timer> mLinuxGuiTimer;

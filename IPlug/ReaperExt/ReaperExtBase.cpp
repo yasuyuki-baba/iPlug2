@@ -2,6 +2,10 @@
 #define IPLUG_STRINGIFY_HELPER(x) #x
 #define IPLUG_STRINGIFY(x) IPLUG_STRINGIFY_HELPER(x)
 
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+static constexpr UINT_PTR kLinuxCloseTimer = 0x49504C43;
+#endif
+
 ReaperExtBase::ReaperExtBase(reaper_plugin_info_t* pRec)
 : EDITOR_DELEGATE_CLASS(0) // zero params
 , mRec(pRec)
@@ -433,6 +437,11 @@ WDL_DLGRET ReaperExtBase::MainDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
 
       gPlug->OpenWindow(hwnd);
 
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+      if (!SetTimer(hwnd, kLinuxCloseTimer, IDLE_TIMER_RATE, nullptr))
+        fprintf(stderr, "Could not schedule REAPER extension native-close dispatch\n");
+#endif
+
       // Trigger initial resize now that IGraphics exists
       // (WM_SIZE during SetWindowPos/DockWindowAddEx above fires before OpenWindow)
       {
@@ -458,6 +467,9 @@ WDL_DLGRET ReaperExtBase::MainDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
     }
     case WM_DESTROY:
     {
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+      KillTimer(hwnd, kLinuxCloseTimer);
+#endif
       if (gPlug->mSaveStateOnDestroy)
         gPlug->SaveDockState();
 
@@ -466,6 +478,12 @@ WDL_DLGRET ReaperExtBase::MainDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
       gPlug->UpdateToggleStates(); // also covers the user closing the window directly
       return 0;
     }
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+    case WM_TIMER:
+      if (wParam == kLinuxCloseTimer && gPlug->CloseWindowIfRequested())
+        DestroyWindow(hwnd);
+      return 0;
+#endif
     case WM_SIZE:
     {
 #ifndef NO_IGRAPHICS

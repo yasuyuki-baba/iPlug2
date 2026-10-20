@@ -38,7 +38,7 @@ CMake and Ninja can be installed via:
 sudo apt-get install -y \
   ninja-build pkg-config \
   libfreetype-dev libfontconfig-dev \
-  libx11-dev libxi-dev libxext-dev libxrender-dev \
+  libx11-dev libx11-xcb-dev libxcb1-dev libxi-dev libxext-dev libxrender-dev \
   libxrandr-dev libxfixes-dev libxcursor-dev \
   libgl-dev libgtk-3-dev \
   libasound2-dev libjack-jackd2-dev libpulse-dev
@@ -144,13 +144,13 @@ These tests use a separate build directory and never deploy plugins to user/syst
 scan paths or use an audio device. Deployment fixtures copy only inside the test
 build directory. The tests require `xvfb`, `xauth`, and Mesa's software renderer
 (`libgl1-mesa-dri` on Ubuntu/Debian), in addition to the Linux build dependencies.
-The CLAP host tests also require the CLAP SDK and CLAP helpers headers.
+The host tests require the VST3 SDK, CLAP SDK, and CLAP helpers headers.
 
 ```bash
 cmake -S Tests/Linux -B build/linux-regression -DCMAKE_BUILD_TYPE=Release
 cmake --build build/linux-regression --parallel 2 \
   --target IPlugEffect-app LinuxGuiTest LinuxStartupHooks \
-  LinuxDialogTest LinuxRuntimeTest LinuxClapHostTest
+  LinuxDialogTest LinuxRuntimeTest LinuxClapHostTest LinuxVst3HostTest
 ctest --test-dir build/linux-regression --output-on-failure
 ```
 
@@ -168,6 +168,25 @@ and rejected timer/fd extensions, callback coalescing, GUI hide/show/destroy, an
 window/fallback-timer initialization failures.
 The deployment fixture also checks Linux REAPER extension `reaper_*.so` naming
 and deployment of web resources alongside the extension using an isolated path.
+Actual resource lookup is checked in separate processes for both COPY and SYMLINK
+deployment, including VST3 bundles and two flat plugins with different contents
+under the same resource filename. Missing resources must not resolve to another
+plugin, the host executable, or the legacy shared resource directory.
+Native X11 close events are tested with internal and host-driven event
+loops. Clipboard tests include two editors sharing one UI thread, an independent
+client pasting while the owner's main thread is blocked, and service startup failures.
+They also destroy requestor windows during transfers under both the default and
+a host-installed X11 error handler, then verify later replies and unrelated host
+errors still work.
+The VST3 host tests check real knob gestures and rendering on the host UI thread,
+run loops supplied by the frame or initialization context, missing/rejected
+registrations, frame replacement, native close, and editor reopening.
+Dedicated idle probes check main-thread callbacks before opening an editor, after
+closing it, and in builds without IGraphics. They also check queued UI messages,
+callback coalescing, timer initialization failures, and teardown.
+Close lifecycle probes check that `OnUIClose()` runs once on the main thread with
+live controls, including native close, later host teardown, reopening, and
+standalone graphics-timer initialization failure.
 Fault-injection hooks and exported executable symbols are confined to this test
 build. The Linux Ninja CI job runs this suite with software OpenGL under Xvfb.
 
@@ -181,11 +200,53 @@ Linux drawing skips a timer tick when the graphics mutex is busy, so editor
 teardown can join the drawing thread without a lock inversion. Core timer creation
 logs an error and returns `nullptr` if the worker cannot be created.
 
+VST3 editors use the host's Linux `IRunLoop` for X11 input and drawing. The run loop
+must be available through the frame or initialization context and accept a GUI
+timer; otherwise editor attachment fails explicitly rather than using a worker
+thread for VST3 UI notifications. FD registration is optional because timer ticks
+also poll X11. Registrations are released before the editor or frame is replaced.
+The core idle/message timer is separate from the editor timer and remains active
+until plugin termination. It uses the initialization context's run loop, or retains
+the first usable frame run loop if the context does not provide one. If neither
+provides a usable run loop, idle dispatch is unavailable and a diagnostic is logged;
+it never falls back to calling UI or host code on a worker thread.
+
 CLAP uses host timers when available. If timer support is missing or registration
 fails, a private timer requests coalesced `on_main_thread` callbacks; X11 event
 handling and rendering still run on the host's main thread. Host fd support is
 optional because GUI ticks also poll X11. All registrations and fallback workers
 are released when the GUI is hidden or destroyed and recreated when shown again.
+Native close events also release VST3/CLAP GUI registrations before reopening.
+X11 close events only record a request and stop drawing. VST3/CLAP complete it
+after graphics dispatch returns, unregistering GUI callbacks before closing through
+the editor delegate. Standalone completes the request on its SWELL idle timer.
+REAPER extension windows use a SWELL window timer to complete the request and
+close their container on the host main thread.
+This keeps controls alive during `OnUIClose()` and avoids destroying a graphics
+object from its own worker or event-processing stack. Repeated host close calls
+do not repeat the callback.
+CLAP core idle/message delivery uses separate coalesced `on_main_thread` requests,
+including when the editor is hidden, destroyed, or absent. Its worker only requests
+host callbacks and is joined before the CLAP host proxy is destroyed. Initialization
+fails explicitly if this worker cannot be created. Standalone idle/message delivery
+uses the SWELL main-loop timer rather than a worker.
+
+Clipboard ownership uses a dedicated X11 connection and worker, so selection
+requests do not depend on either plugin's UI loop being dispatched. Text remains
+available after an editor closes while its module is loaded. Failure to open the
+clipboard connection or start its worker is logged and reported to the caller.
+Clipboard replies use checked XCB requests on that dedicated connection. A paste
+target disappearing during a transfer cancels the reply without invoking the
+host's X11 error handler or replacing that handler process-wide.
+Linux resource lookup resolves module symlinks before searching adjacent resources.
+Flat binaries use an adjacent, binary-specific directory such as
+`MyPlugin.clap.resources/ttf/Roboto-Regular.ttf` or
+`MyPlugin.resources/ttf/Roboto-Regular.ttf` for a standalone app. COPY deployment
+copies only that binary's resource directory; SYMLINK deployment finds resources
+beside the resolved binary. When installing manually, keep the binary and its
+`.resources` directory together. VST3 keeps the existing `Contents/Resources/`
+bundle layout. The old shared `resources/` directory is no longer searched:
+rebuild and redeploy Linux binaries to populate the isolated directories.
 
 For interactive standalone testing, `IPlugEffect --no-io` opens only the editor.
 Linux preserves ALSA diagnostics; audio startup failures leave the editor available
@@ -427,7 +488,7 @@ iplug_add_plugin(<name>
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `SOURCES` | Source files (.cpp, .h, .mm) | Required |
-| `RESOURCES` | Bundle resources (fonts, images) - goes into `Resources/` | None |
+| `RESOURCES` | Fonts/images in bundle `Resources/`, or a binary-specific `.resources/` directory for flat Linux binaries | None |
 | `WEB_RESOURCES` | Web UI files (HTML, JS, CSS) - goes into `Resources/web/` | None |
 | `FORMATS` | Target formats to build | `ALL` |
 | `EXCLUDE_FORMATS` | Formats to exclude | None |

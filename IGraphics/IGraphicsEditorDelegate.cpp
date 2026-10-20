@@ -14,6 +14,7 @@
 #include <algorithm>
 
 #ifdef OS_LINUX
+#include "IGraphicsLinux.h"
 #define IPLUG_GFX_LOCK std::lock_guard<std::recursive_mutex> gfxLock(mGfxMutex)
 #else
 #define IPLUG_GFX_LOCK ((void)0)
@@ -42,7 +43,14 @@ void* IGEditorDelegate::OpenWindow(void* pParent)
   }
   
   if(mGraphics)
-    return mGraphics->OpenWindow(pParent);
+  {
+    void* window = mGraphics->OpenWindow(pParent);
+#ifdef OS_LINUX
+    if (!window)
+      CloseWindow();
+#endif
+    return window;
+  }
   else
     return nullptr;
 }
@@ -50,10 +58,19 @@ void* IGEditorDelegate::OpenWindow(void* pParent)
 void IGEditorDelegate::CloseWindow()
 {
   IPLUG_GFX_LOCK;
+#ifdef OS_LINUX
+  if (!mGraphics)
+    return;
+#endif
   if (!mClosing)
   {
     mClosing = true;
+#ifdef OS_LINUX
+    if (mGraphics->WindowIsOpen())
+      IEditorDelegate::CloseWindow();
+#else
     IEditorDelegate::CloseWindow();
+#endif
   
     if (mGraphics)
     {
@@ -63,10 +80,23 @@ void IGEditorDelegate::CloseWindow()
       mGraphics->CloseWindow();
       mGraphics = nullptr;
     }
-    
+
     mClosing = false;
   }
 }
+
+#ifdef OS_LINUX
+bool IGEditorDelegate::CloseWindowIfRequested()
+{
+  IPLUG_GFX_LOCK;
+  if (mGraphics && static_cast<IGraphicsLinux*>(mGraphics.get())->WindowCloseRequested())
+  {
+    CloseWindow();
+    return true;
+  }
+  return false;
+}
+#endif
 
 void IGEditorDelegate::OnParentWindowResize(int width, int height)
 {
