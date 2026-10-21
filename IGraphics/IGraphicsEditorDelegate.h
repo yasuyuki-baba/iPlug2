@@ -100,9 +100,8 @@ public:
   /** Mutex protecting mGraphics access from concurrent threads on Linux.
    *  The host may call SendParameterValueFromDelegate, CloseWindow, etc.
    *  from any thread while the timer/draw thread is running. Recursive
-   *  because resize paths re-enter (e.g. OnParentWindowResize calls
-   *  OnBeginHostResize/Resize/OnEndHostResize, and DrawResize may be
-   *  called from within OnDisplayTimer while the lock is held). */
+   *  because resize and close paths re-enter (e.g. OnParentWindowResize
+   *  and DrawResize may be called while the lock is held). */
   std::recursive_mutex& GfxMutex() { return mGfxMutex; }
 #endif
 

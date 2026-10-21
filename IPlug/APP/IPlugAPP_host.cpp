@@ -25,6 +25,7 @@
 #endif
 
 #include "IPlugLogger.h"
+#include "IPlugPaths.h" // IsSafeAbsoluteDir
 
 using namespace iplug;
 
@@ -155,13 +156,13 @@ bool IPlugAPPHost::InitState()
   const char* xdgConfig = getenv("XDG_CONFIG_HOME");
   const char* home = getenv("HOME");
   std::filesystem::path directory;
-  if (xdgConfig && xdgConfig[0] == '/')
+  if (IsSafeAbsoluteDir(xdgConfig))
     directory = std::filesystem::path(xdgConfig) / BUNDLE_NAME;
-  else if (home && home[0] == '/')
+  else if (IsSafeAbsoluteDir(home))
     directory = std::filesystem::path(home) / ".config" / BUNDLE_NAME;
   else
   {
-    fprintf(stderr, "Cannot resolve settings directory: an absolute XDG_CONFIG_HOME or HOME is required\n");
+    fprintf(stderr, "Cannot resolve settings directory: a safe absolute XDG_CONFIG_HOME or HOME is required\n");
     return false;
   }
 

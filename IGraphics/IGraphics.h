@@ -1159,9 +1159,6 @@ public:
   /** @return true if resizing is in process */
   bool GetResizingInProcess() const { return mResizingInProcess; }
 
-  /** Cancel any in-progress corner-resizer drag (e.g. when host takes over resize) */
-  void CancelDragResize() { mResizingInProcess = false; }
-
   /** Enable/disable multi touch, if platform supports it
     * @return \c true if platform supports it */
   bool EnableMultiTouch(bool enable)
@@ -1281,16 +1278,6 @@ private:
 
 #pragma mark - Control management
 public:
-  /** Called on the host UI thread immediately before host-initiated resize so that
-   *  platform implementations can serialise it with the render thread.
-   *  @param physW Physical width the host requested (pixels)
-   *  @param physH Physical height the host requested (pixels)
-   *  Paired with OnEndHostResize(). Default is a no-op. */
-  virtual void OnBeginHostResize(int physW, int physH) {}
-
-  /** Paired release for OnBeginHostResize(). */
-  virtual void OnEndHostResize() {}
-
   /** For all controls, including the "special controls" call a method
    * @param func A std::function to perform on each control */
   void ForAllControlsFunc(IControlFunction func);

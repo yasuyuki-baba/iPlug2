@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <mutex>
 #include <cstring>
 #include <cstdlib>
@@ -554,6 +555,31 @@ static void GtkPresentDialog(GTK3* g, void* dialog)
     g->window_present(dialog);
 }
 
+// Launch a detached external process. Double-forks so the grandchild is
+// reparented to init and the intermediate child is reaped here — neither
+// becomes a zombie. Returns true if the launch was initiated.
+static bool LaunchDetached(const char* program, const char* arg)
+{
+  pid_t pid = fork();
+  if (pid == 0)
+  {
+    pid_t grandchild = fork();
+    if (grandchild == 0)
+    {
+      execlp(program, program, arg, (char*)nullptr);
+      _exit(127);
+    }
+    _exit(grandchild > 0 ? 0 : 1);
+  }
+  if (pid > 0)
+  {
+    int status;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return true;
+  }
+  return false;
+}
+
 static bool GtkAddFileFilters(GTK3* g, void* dialog, const char* ext)
 {
   WDL_String extensions(ext ? ext : "");
@@ -775,8 +801,6 @@ void* IGraphicsLinux::OpenWindow(void* pParent)
     0, vi->depth, InputOutput, vi->visual,
     CWColormap | CWEventMask, &attrs
   );
-  mLastPhysW = physW;
-  mLastPhysH = physH;
   XFree(vi);
 #else
   XSetWindowAttributes attrs = {};
@@ -795,8 +819,6 @@ void* IGraphicsLinux::OpenWindow(void* pParent)
     0, CopyFromParent, InputOutput, CopyFromParent,
     CWEventMask | CWBackPixel, &attrs
   );
-  mLastPhysW = physW;
-  mLastPhysH = physH;
 #endif
 
   if (!mPlugWnd)
@@ -915,14 +937,10 @@ void IGraphicsLinux::CloseWindow()
 
 void IGraphicsLinux::PlatformResize(bool parentHasResized)
 {
-  // When handling a ConfigureNotify or host-driven resize, the X server (or
-  // host) already sized our window. Calling XResizeWindow here would create an
-  // oscillation or fight the host's window manager.
-  if (mInConfigureNotify || mInHostResize || mHostDidResize)
-  {
-    mHostDidResize = false;
+  // When handling a ConfigureNotify, the X server already sized our window.
+  // Calling XResizeWindow here would create an oscillation.
+  if (mInConfigureNotify)
     return;
-  }
 
   if (mDisplay && mPlugWnd)
   {
@@ -930,8 +948,6 @@ void IGraphicsLinux::PlatformResize(bool parentHasResized)
     auto w = (unsigned)(WindowWidth()  * GetScreenScale());
     auto h = (unsigned)(WindowHeight() * GetScreenScale());
     XResizeWindow(mDisplay, mPlugWnd, w, h);
-    mLastPhysW = w;
-    mLastPhysH = h;
   }
 }
 
@@ -939,30 +955,6 @@ void IGraphicsLinux::DrawResize()
 {
   std::lock_guard<std::recursive_mutex> lock(GetDelegate()->GfxMutex());
   IGRAPHICS_DRAW_CLASS::DrawResize();
-}
-
-void IGraphicsLinux::OnBeginHostResize(int physW, int physH)
-{
-  mInHostResize = true;
-  mHostPhysW = static_cast<unsigned>(physW);
-  mHostPhysH = static_cast<unsigned>(physH);
-}
-
-void IGraphicsLinux::OnEndHostResize()
-{
-  // Resize our X11 window to match the host's requested size exactly.
-  // In Scale mode, WindowWidth()/WindowHeight() may differ from the
-  // host's size due to aspect ratio correction (max(scaleX, scaleY)),
-  // so use the stored host size to avoid oscillation.
-  if (mDisplay && mPlugWnd && mHostPhysW && mHostPhysH)
-  {
-    XResizeWindow(mDisplay, mPlugWnd, mHostPhysW, mHostPhysH);
-    mLastPhysW = mHostPhysW;
-    mLastPhysH = mHostPhysH;
-  }
-
-  mInHostResize = false;
-  mHostDidResize = true;
 }
 
 void IGraphicsLinux::ForceEndUserEdit()
@@ -1137,18 +1129,13 @@ bool IGraphicsLinux::RevealPathInExplorerOrFinder(WDL_String& path, bool select)
   WDL_String dir(path);
   if (select)
   {
-    char* lastSlash = strrchr(dir.Get(), '/');
-    if (lastSlash)
-      *lastSlash = '\0';
+    // Truncate to the parent dir via WDL_String, not by writing '\0' through
+    // Get() — that desyncs the cached length and is UB on the const buffer.
+    if (strrchr(dir.Get(), '/'))
+      dir.remove_filepart(false);
   }
 
-  pid_t pid = fork();
-  if (pid == 0)
-  {
-    execlp("xdg-open", "xdg-open", dir.Get(), nullptr);
-    _exit(127);
-  }
-  return pid > 0;
+  return LaunchDetached("xdg-open", dir.Get());
 }
 
 void IGraphicsLinux::PromptForFile(WDL_String& fileName, WDL_String& path,
@@ -1318,13 +1305,7 @@ bool IGraphicsLinux::PromptForColor(IColor& color, const char* str,
 
 bool IGraphicsLinux::OpenURL(const char* url, const char* msgWindowTitle, const char* confirmMsg, const char* errMsgOnFailure)
 {
-  pid_t pid = fork();
-  if (pid == 0)
-  {
-    execlp("xdg-open", "xdg-open", url, nullptr);
-    _exit(127);
-  }
-  return pid > 0;
+  return LaunchDetached("xdg-open", url);
 }
 
 bool IGraphicsLinux::GetTextFromClipboard(WDL_String& str)
@@ -1829,10 +1810,6 @@ void IGraphicsLinux::ProcessX11Events()
             ce = next.xconfigure;
           }
         }
-
-        // Update tracking to the actual X11 window size.
-        mLastPhysW = (unsigned)ce.width;
-        mLastPhysH = (unsigned)ce.height;
 
         const float ss = GetScreenScale();
         const int physW = ce.width;

@@ -102,8 +102,6 @@ public:
 
   void PlatformResize(bool parentHasResized) override;
   void DrawResize() override;
-  void OnBeginHostResize(int physW, int physH) override;
-  void OnEndHostResize() override;
 
   void HideMouseCursor(bool hide, bool lock) override;
   void MoveMouseCursor(float x, float y) override;
@@ -171,20 +169,6 @@ private:
 
   bool mHostDriven = false;        // set true before OpenWindow when host drives the event loop
   bool mInConfigureNotify = false; // suppress PlatformResize re-entry from ConfigureNotify
-  bool mInHostResize = false;      // suppress XResizeWindow during host-driven resize
-  bool mHostDidResize = false;     // set by OnEndHostResize; cleared by PlatformResize
-
-  // The physical size the host last passed via onSize → OnParentWindowResize.
-  // OnEndHostResize uses this to XResizeWindow to exactly the host's size,
-  // avoiding aspect-ratio drift from Scale mode's max(scaleX, scaleY).
-  unsigned mHostPhysW = 0;
-  unsigned mHostPhysH = 0;
-
-  // Last physical size we actually passed to XResizeWindow (or XCreateWindow).
-  // ConfigureNotify events for any other size are stale (from a superseded
-  // XResizeWindow request) and must be ignored to prevent mWidth from reverting.
-  unsigned mLastPhysW = 0;
-  unsigned mLastPhysH = 0;
 
   bool StartTimer();
   void StopTimer();

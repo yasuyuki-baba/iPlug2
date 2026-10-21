@@ -25,6 +25,8 @@ extern bool SaveWindowScreenshot(HWND hwnd, const char* path);
 extern "C" bool SaveWindowScreenshot(void* hwnd, const char* path);
 #elif defined OS_LINUX
 #include <unistd.h>
+#include <sys/wait.h>
+#include <cerrno>
 #define GET_MENU() GetMenu(gHWND)
 static bool SaveWindowScreenshot(HWND, const char*) { return false; }
 #endif
@@ -498,10 +500,23 @@ WDL_DLGRET IPlugAPPHost::PreferencesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wPar
             }
             #elif defined OS_LINUX
             {
+              // Double-fork so the launched process is reparented to init and the
+              // intermediate child is reaped here — no zombie accumulation.
               pid_t pid = fork();
-              if (pid == 0) {
-                execlp("xdg-open", "xdg-open", "https://alsa-project.org", nullptr);
-                _exit(127);
+              if (pid == 0)
+              {
+                pid_t grandchild = fork();
+                if (grandchild == 0)
+                {
+                  execlp("xdg-open", "xdg-open", "https://alsa-project.org", (char*)nullptr);
+                  _exit(127);
+                }
+                _exit(grandchild > 0 ? 0 : 1);
+              }
+              if (pid > 0)
+              {
+                int status;
+                while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
               }
             }
             #endif
