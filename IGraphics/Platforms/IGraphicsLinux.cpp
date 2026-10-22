@@ -19,6 +19,7 @@
 #include <dlfcn.h>
 #include <poll.h>
 #include <cerrno>
+#include <climits>
 // Fontconfig is loaded via dlopen so the plugin works without it installed.
 // Only the font-by-name lookup (LoadPlatformFont) needs it; embedded fonts work regardless.
 
@@ -48,6 +49,11 @@
 // headers from being re-included.
 #include "IGraphicsLinux.h"
 #include "IGraphicsStructs.h"
+#include "wdlutf8.h"
+
+#if defined APP_API || defined REAPER_EXT_API
+#include "IPlugSWELLTimer.h"
+#endif
 
 using namespace iplug;
 using namespace igraphics;
@@ -715,8 +721,6 @@ IGraphicsLinux::~IGraphicsLinux()
   CloseWindow();
 }
 
-static int sIgnoreX11Error(Display*, XErrorEvent*) { return 0; }
-
 void* IGraphicsLinux::OpenWindow(void* pParent)
 {
   StopTimer();
@@ -728,19 +732,37 @@ void* IGraphicsLinux::OpenWindow(void* pParent)
   int screen = DefaultScreen(mDisplay);
   Window root = RootWindow(mDisplay, screen);
 
-  // Validate pParent is an actual X11 Window, not a SWELL generic HWND pointer.
-  // In standalone mode the APP host passes gHWND, which is a heap pointer —
-  // XGetWindowAttributes will fail for it and we fall back to root.
   mParentWnd = root;
   if (pParent)
   {
-    XErrorHandler prev = XSetErrorHandler(sIgnoreX11Error);
-    XWindowAttributes wa = {};
-    int ok = XGetWindowAttributes(mDisplay, (Window)(uintptr_t)pParent, &wa);
-    XSync(mDisplay, 0 /* discard=False */);
-    XSetErrorHandler(prev);
-    if (ok)
-      mParentWnd = (Window)(uintptr_t)pParent;
+    auto* connection = XGetXCBConnection(mDisplay);
+    if (!connection)
+    {
+      fprintf(stderr, "Could not access the XCB connection to validate the editor parent\n");
+      XCloseDisplay(mDisplay);
+      mDisplay = nullptr;
+      return nullptr;
+    }
+    const uintptr_t parent = reinterpret_cast<uintptr_t>(pParent);
+    xcb_generic_error_t* error = nullptr;
+    xcb_get_window_attributes_reply_t* attributes = nullptr;
+    if (parent <= UINT32_MAX)
+      attributes = xcb_get_window_attributes_reply(connection,
+        xcb_get_window_attributes(connection, static_cast<xcb_window_t>(parent)), &error);
+    if (attributes && !error)
+      mParentWnd = static_cast<Window>(parent);
+    else
+      fprintf(stderr, "Invalid X11 editor parent 0x%lx; using a top-level window\n",
+              static_cast<unsigned long>(parent));
+    free(attributes);
+    free(error);
+    if (xcb_connection_has_error(connection))
+    {
+      fprintf(stderr, "The XCB connection failed while validating the editor parent\n");
+      XCloseDisplay(mDisplay);
+      mDisplay = nullptr;
+      return nullptr;
+    }
   }
 
   // Detect HiDPI scale factor. The standalone APP sets IPLUG2_SCREEN_SCALE after
@@ -864,7 +886,20 @@ void* IGraphicsLinux::OpenWindow(void* pParent)
   XFlush(mDisplay);
 
 #ifdef IGRAPHICS_GL
-  if (!glXMakeCurrent(mDisplay, mPlugWnd, (GLXContext)mGLContext))
+  bool initialized = false;
+  {
+    ScopedGLContext scopedGLCtx {this};
+    if (glXGetCurrentContext() == mGLContext && glXGetCurrentDrawable() == mPlugWnd)
+    {
+      gladLoadGL();
+      OnViewInitialized(nullptr);
+      GetDelegate()->LayoutUI(this);
+      SetAllControlsDirty();
+      DrawResize();
+      initialized = true;
+    }
+  }
+  if (!initialized)
   {
     DestroyGLContext();
     if (mGLColormap) { XFreeColormap(mDisplay, mGLColormap); mGLColormap = 0; }
@@ -872,14 +907,6 @@ void* IGraphicsLinux::OpenWindow(void* pParent)
     XCloseDisplay(mDisplay); mDisplay = nullptr;
     return nullptr;
   }
-  gladLoadGL();
-  // Keep GL context current through OnViewInitialized, LayoutUI, and DrawResize —
-  // NanoVG context creation, font loading, and FBO initialisation all need active GL.
-  OnViewInitialized(nullptr);
-  GetDelegate()->LayoutUI(this);
-  SetAllControlsDirty();
-  DrawResize();
-  glXMakeCurrent(mDisplay, 0, nullptr);
 #else
   OnViewInitialized(nullptr);
   GetDelegate()->LayoutUI(this);
@@ -887,6 +914,7 @@ void* IGraphicsLinux::OpenWindow(void* pParent)
   DrawResize();
 #endif
 
+  CreateInputContext();
   GetDelegate()->OnUIOpen();
 
   // Mark dirty so the first timer tick renders immediately, even if no
@@ -900,12 +928,19 @@ void* IGraphicsLinux::OpenWindow(void* pParent)
 
 void IGraphicsLinux::CloseWindow()
 {
+  if (IsInPlatformCallback())
+  {
+    RequestWindowClose();
+    return;
+  }
   StopTimer();
   if (!mDisplay)
     return;
 
-  ActivateGLContext();
-  OnViewDestroyed();
+  {
+    ScopedGLContext scopedGLCtx {this};
+    OnViewDestroyed();
+  }
 
 #ifdef IGRAPHICS_GL
   DestroyGLContext();
@@ -917,6 +952,7 @@ void IGraphicsLinux::CloseWindow()
     mBlankCursor = 0;
   }
 
+  DestroyInputContext();
   if (mPlugWnd)
   {
     XDestroyWindow(mDisplay, mPlugWnd);
@@ -1048,9 +1084,14 @@ void IGraphicsLinux::GetMouseLocation(float& x, float& y) const
   Window root, child;
   int rootX, rootY, winX, winY;
   unsigned int mask;
-  XQueryPointer(mDisplay, mPlugWnd, &root, &child, &rootX, &rootY, &winX, &winY, &mask);
-  x = (float)winX;
-  y = (float)winY;
+  if (!XQueryPointer(mDisplay, mPlugWnd, &root, &child, &rootX, &rootY, &winX, &winY, &mask))
+  {
+    x = y = 0.f;
+    return;
+  }
+  const float scale = GetTotalScale();
+  x = winX / scale;
+  y = winY / scale;
 }
 
 EMsgBoxResult IGraphicsLinux::ShowMessageBox(const char* str, const char* title,
@@ -1665,16 +1706,28 @@ void IGraphicsLinux::CachePlatformFont(const char* fontID, const PlatformFontPtr
 void IGraphicsLinux::ActivateGLContext()
 {
 #ifdef IGRAPHICS_GL
+  mGLContextStack.push_back({glXGetCurrentDisplay(), glXGetCurrentContext(),
+                            glXGetCurrentDrawable(), glXGetCurrentReadDrawable()});
   if (!mDisplay || !mGLContext) return;
-  glXMakeCurrent(mDisplay, mPlugWnd, (GLXContext)mGLContext);
+  if (!glXMakeCurrent(mDisplay, mPlugWnd, (GLXContext)mGLContext))
+    fprintf(stderr, "Could not activate the Linux graphics GLX context\n");
 #endif
 }
 
 void IGraphicsLinux::DeactivateGLContext()
 {
 #ifdef IGRAPHICS_GL
-  if (!mDisplay) return;
-  glXMakeCurrent(mDisplay, 0, nullptr);
+  assert(!mGLContextStack.empty());
+  const auto state = mGLContextStack.back();
+  mGLContextStack.pop_back();
+  if (glXGetCurrentDisplay() == state.display && glXGetCurrentContext() == state.context &&
+      glXGetCurrentDrawable() == state.drawable && glXGetCurrentReadDrawable() == state.readDrawable)
+    return;
+
+  Display* display = state.context ? state.display : glXGetCurrentDisplay();
+  if (display && !glXMakeContextCurrent(display, state.drawable, state.readDrawable,
+                                       static_cast<GLXContext>(state.context)))
+    fprintf(stderr, "Could not restore the previous GLX context\n");
 #endif
 }
 
@@ -1714,7 +1767,9 @@ void IGraphicsLinux::DestroyGLContext()
 {
   if (mDisplay && mGLContext)
   {
-    glXMakeCurrent(mDisplay, 0, nullptr);
+    if (glXGetCurrentContext() == mGLContext)
+      if (!glXMakeCurrent(mDisplay, 0, nullptr))
+        fprintf(stderr, "Could not release the Linux graphics GLX context\n");
     glXDestroyContext(mDisplay, (GLXContext)mGLContext);
     mGLContext = nullptr;
   }
@@ -1768,17 +1823,173 @@ static int KeysymToVK(KeySym ks)
   }
 }
 
+void IGraphicsLinux::CreateInputContext()
+{
+  // Use the host's locale/modifiers; changing them here would affect every plugin.
+  mInputMethod = XOpenIM(mDisplay, nullptr, nullptr, nullptr);
+  if (mInputMethod)
+  {
+    XIMCallback destroyed {};
+    destroyed.client_data = reinterpret_cast<XPointer>(this);
+    destroyed.callback = [](XIM, XPointer data, XPointer) {
+      auto* graphics = reinterpret_cast<IGraphicsLinux*>(data);
+      graphics->mInputContext = nullptr;
+      graphics->mInputMethod = nullptr;
+      fprintf(stderr, "The Linux input method disconnected; Compose and IME input are unavailable\n");
+    };
+    if (XSetIMValues(mInputMethod, XNDestroyCallback, &destroyed, nullptr))
+    {
+      fprintf(stderr, "Could not register the Linux input method disconnect callback; Compose and IME input are unavailable\n");
+      DestroyInputContext();
+      return;
+    }
+    mInputContext = XCreateIC(mInputMethod,
+      XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+      XNClientWindow, mPlugWnd, XNFocusWindow, mPlugWnd, nullptr);
+  }
+  if (!mInputContext)
+  {
+    fprintf(stderr, "Could not create the Linux input context; Compose and IME input are unavailable\n");
+    DestroyInputContext();
+    return;
+  }
+  long filterEvents = 0;
+  if (XGetICValues(mInputContext, XNFilterEvents, &filterEvents, nullptr) == nullptr)
+  {
+    XWindowAttributes attributes {};
+    if (XGetWindowAttributes(mDisplay, mPlugWnd, &attributes))
+      XSelectInput(mDisplay, mPlugWnd, attributes.your_event_mask | filterEvents);
+  }
+}
+
+void IGraphicsLinux::DestroyInputContext()
+{
+  if (mInputContext)
+  {
+    XDestroyIC(mInputContext);
+    mInputContext = nullptr;
+  }
+  if (mInputMethod)
+  {
+    XCloseIM(mInputMethod);
+    mInputMethod = nullptr;
+  }
+}
+
+void IGraphicsLinux::DispatchKeyEvent(XKeyEvent& event)
+{
+  KeySym symbol = 0;
+  WDL_TypedBuf<char> text;
+  text.Resize(64);
+  if (!text.Get())
+  {
+    fprintf(stderr, "Could not allocate the Linux keyboard input buffer\n");
+    return;
+  }
+  int length = 0;
+  if (event.type == KeyPress && mInputContext)
+  {
+    int status = 0;
+    length = Xutf8LookupString(mInputContext, &event, text.Get(), text.GetSize() - 1, &symbol, &status);
+    if (status == XBufferOverflow && length > 0 && length < INT_MAX)
+    {
+      text.Resize(length + 1);
+      if (text.GetSize() != length + 1)
+      {
+        fprintf(stderr, "Could not allocate the Linux input method commit buffer\n");
+        return;
+      }
+      length = Xutf8LookupString(mInputContext, &event, text.Get(), text.GetSize() - 1, &symbol, &status);
+    }
+    if (status != XLookupChars && status != XLookupKeySym && status != XLookupBoth)
+    {
+      if (status != XLookupNone)
+        fprintf(stderr, "Could not read the Linux input method commit (status %d)\n", status);
+      return;
+    }
+    if (status == XLookupChars)
+      symbol = 0;
+    if (status == XLookupKeySym)
+      length = 0;
+  }
+  else
+  {
+    // Key releases cannot use Xutf8LookupString. Encode printable keysyms rather
+    // than assuming XLookupString's locale-dependent bytes are Latin-1 or UTF-8.
+    length = XLookupString(&event, text.Get(), text.GetSize() - 1, &symbol, nullptr);
+    const bool ascii = length == 1 && static_cast<unsigned char>(text.Get()[0]) < 0x80;
+    if (!ascii && symbol >= 0xA0 && symbol <= 0xFF)
+      length = wdl_utf8_makechar(static_cast<int>(symbol), text.Get(), text.GetSize() - 1);
+    else if (!ascii && (symbol & 0xFF000000UL) == 0x01000000UL)
+    {
+      const auto codepoint = static_cast<int>(symbol & 0xFFFFFFUL);
+      if (codepoint <= 0x10FFFF && !(codepoint >= 0xD800 && codepoint <= 0xDFFF))
+        length = wdl_utf8_makechar(codepoint, text.Get(), text.GetSize() - 1);
+    }
+  }
+  if (length < 0 || length >= text.GetSize())
+  {
+    fprintf(stderr, "Invalid Linux input method commit length %d\n", length);
+    return;
+  }
+  text.Get()[length] = '\0';
+  // A phrase commit can accompany the Return keysym used to accept an IME candidate.
+  if (length > 1)
+    symbol = 0;
+
+  int offset = 0;
+  do
+  {
+    char character[5] {};
+    int size = 0;
+    if (offset < length)
+    {
+      int codepoint = 0;
+      size = wdl_utf8_parsechar(text.Get() + offset, &codepoint);
+      char encoded[4] {};
+      if (size > 4 || offset + size > length || codepoint > 0x10FFFF ||
+          (codepoint >= 0xD800 && codepoint <= 0xDFFF) ||
+          wdl_utf8_makechar(codepoint, encoded, sizeof(encoded)) != size ||
+          memcmp(encoded, text.Get() + offset, size) != 0)
+      {
+        fprintf(stderr, "The Linux input method returned invalid UTF-8\n");
+        return;
+      }
+      memcpy(character, text.Get() + offset, size);
+    }
+    // IKeyPress holds one UTF-8 code point, while an IME can commit an entire phrase.
+    IKeyPress key(character, offset == 0 ? KeysymToVK(symbol) : kVK_NONE,
+                  (event.state & ShiftMask) != 0, (event.state & ControlMask) != 0,
+                  (event.state & Mod1Mask) != 0);
+    if (event.type == KeyPress)
+      OnKeyDown(mCursorX, mCursorY, key);
+    else
+      OnKeyUp(mCursorX, mCursorY, key);
+    offset += size;
+  } while (offset < length && !mCloseRequested);
+}
+
 void IGraphicsLinux::ProcessX11Events()
+{
+  if (IsInPlatformCallback())
+    return;
+  DispatchScope dispatch(mDispatchDepth);
+  DispatchX11Events();
+}
+
+void IGraphicsLinux::DispatchX11Events()
 {
   if (!mDisplay || !mPlugWnd || mCloseRequested)
     return;
 
   const float scale = GetTotalScale();
 
-  while (XPending(mDisplay))
+  while (!mCloseRequested && XPending(mDisplay))
   {
     XEvent ev;
     XNextEvent(mDisplay, &ev);
+    if (XFilterEvent(&ev, mPlugWnd))
+      continue;
 
     switch (ev.type)
     {
@@ -1852,6 +2063,7 @@ void IGraphicsLinux::ProcessX11Events()
           // Scroll wheel — only fire on press
           if (ev.type == ButtonPress)
           {
+            XSetInputFocus(mDisplay, mPlugWnd, RevertToParent, be.time);
             const float delta = (be.button == Button4) ? 1.f : -1.f;
             IMouseMod mod(false, false, shift, ctrl, alt);
             OnMouseWheel(x, y, mod, delta);
@@ -1937,28 +2149,20 @@ void IGraphicsLinux::ProcessX11Events()
         OnMouseOut();
         break;
 
+      case FocusIn:
+        if (mInputContext)
+          XSetICFocus(mInputContext);
+        break;
+
+      case FocusOut:
+        if (mInputContext)
+          XUnsetICFocus(mInputContext);
+        break;
+
       case KeyPress:
       case KeyRelease:
-      {
-        XKeyEvent& ke = ev.xkey;
-        char buf[8] = {};
-        KeySym ks = 0;
-        XLookupString(&ke, buf, sizeof(buf) - 1, &ks, nullptr);
-
-        const bool shift = (ke.state & ShiftMask)   != 0;
-        const bool ctrl  = (ke.state & ControlMask) != 0;
-        const bool alt   = (ke.state & Mod1Mask)    != 0;
-
-        IKeyPress keyPress(buf, KeysymToVK(ks), shift, ctrl, alt);
-        const float mx = mCursorX;
-        const float my = mCursorY;
-
-        if (ev.type == KeyPress)
-          OnKeyDown(mx, my, keyPress);
-        else
-          OnKeyUp(mx, my, keyPress);
+        DispatchKeyEvent(ev.xkey);
         break;
-      }
 
       case ClientMessage:
       {
@@ -1995,6 +2199,17 @@ bool IGraphicsLinux::StartTimer()
   if (mHostDriven || mTimerRunning)
     return true;
 
+#if defined APP_API || defined REAPER_EXT_API
+  mMainLoopTimer.reset(SWELLTimer::Create([this](Timer&) { OnDisplayTimer(); },
+    std::max(1, 1000 / FPS())));
+  if (!mMainLoopTimer)
+  {
+    fprintf(stderr, "Could not start Linux graphics main-loop timer\n");
+    return false;
+  }
+  mTimerRunning = true;
+  return true;
+#else
   mTimerRunning = true;
   const int error = pthread_create(&mTimerThread, nullptr, TimerThreadProc, this);
   if (error)
@@ -2006,11 +2221,13 @@ bool IGraphicsLinux::StartTimer()
   }
 
   return true;
+#endif
 }
 
 void IGraphicsLinux::StopTimer()
 {
   mTimerRunning = false;
+  mMainLoopTimer.reset();
   if (mTimerThread && !pthread_equal(mTimerThread, pthread_self()))
   {
     pthread_join(mTimerThread, nullptr);
@@ -2020,6 +2237,9 @@ void IGraphicsLinux::StopTimer()
 
 void IGraphicsLinux::OnDisplayTimer()
 {
+  if (IsInPlatformCallback())
+    return;
+  DispatchScope dispatch(mDispatchDepth);
   // Teardown joins this timer while holding GfxMutex; skip busy frames instead of waiting.
   std::unique_lock<std::recursive_mutex> lock(GetDelegate()->GfxMutex(), std::try_to_lock);
   if (!lock.owns_lock())
@@ -2027,7 +2247,7 @@ void IGraphicsLinux::OnDisplayTimer()
   if (!mDisplay || !mPlugWnd || mCloseRequested)
     return;
 
-  ProcessX11Events();
+  DispatchX11Events();
   if (!mDisplay || !mPlugWnd || mCloseRequested)
     return;
 
@@ -2042,12 +2262,11 @@ void IGraphicsLinux::OnDisplayTimer()
       IRECT full(0, 0, (float)WindowWidth() / scale, (float)WindowHeight() / scale);
       rects.Add(full);
     }
-    ActivateGLContext();
+    ScopedGLContext scopedGLCtx {this};
     Draw(rects);
 #if defined(IGRAPHICS_GL2) || defined(IGRAPHICS_GL3)
     glXSwapBuffers(mDisplay, mPlugWnd);
 #endif
-    DeactivateGLContext();
   }
 }
 

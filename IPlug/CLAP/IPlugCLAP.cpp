@@ -951,7 +951,16 @@ bool IPlugCLAP::guiShow() noexcept
 #else
   if (HasUI() && !mGUIOpen)
   {
+#ifdef OS_LINUX
+    if (!OpenWindow(mWindow))
+    {
+      fprintf(stderr, "Could not show the CLAP editor\n");
+      CloseWindow();
+      return false;
+    }
+#else
     OpenWindow(mWindow);
+#endif
     return true;
   }
   else
@@ -1019,6 +1028,8 @@ bool IPlugCLAP::GUIWindowAttach(void* pWindow) noexcept
   {
 #if defined OS_LINUX && !defined NO_IGRAPHICS
     UnregisterLinuxHostCallbacks();
+#endif
+#ifdef OS_LINUX
     if (!OpenWindow(pWindow))
     {
       fprintf(stderr, "Could not attach the CLAP editor\n");

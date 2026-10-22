@@ -536,6 +536,7 @@ INT_PTR SWELLAppMain(int msg, INT_PTR parm1, INT_PTR parm2)
 HWND gHWND;
 HINSTANCE gHINSTANCE;
 int gStandaloneExitStatus = EXIT_SUCCESS;
+bool gStandaloneCloseRequested = false;
 
 static bool gNoIO = false;
 
@@ -590,6 +591,11 @@ int main(int argc, char** argv)
   while (gHWND)
   {
     SWELL_RunMessageLoop();
+    if (gStandaloneCloseRequested && gHWND)
+    {
+      gStandaloneCloseRequested = false;
+      DestroyWindow(gHWND);
+    }
     Sleep(10);
   }
 

@@ -21,8 +21,13 @@ endif()
 add_subdirectory("${IPLUG2_DIR}/Examples/IPlugEffect" IPlugEffect)
 add_subdirectory(Dialogs)
 add_subdirectory(Idle)
+add_subdirectory(OSC)
 # Export symbols only in this test build so fault injection can identify the graphics timer.
 set_target_properties(IPlugEffect-app PROPERTIES ENABLE_EXPORTS ON)
+foreach(target IPlugEffect-app LinuxIdleProbe-app)
+  target_sources(${target} PRIVATE MainLoopHooks.cpp)
+  target_link_options(${target} PRIVATE "LINKER:--wrap=_Z8SetTimerP6HWND__mjPFvS0_jmjE")
+endforeach()
 
 add_library(LinuxStartupHooks SHARED StartupHooks.cpp)
 target_include_directories(LinuxStartupHooks PRIVATE ${X11_INCLUDE_DIR} ${ALSA_INCLUDE_DIRS})
@@ -31,6 +36,7 @@ target_link_libraries(LinuxStartupHooks PRIVATE ${CMAKE_DL_LIBS} pthread ${ALSA_
 add_executable(LinuxGuiTest GuiTest.cpp)
 target_include_directories(LinuxGuiTest PRIVATE ${X11_INCLUDE_DIR})
 target_link_libraries(LinuxGuiTest PRIVATE ${X11_LIBRARIES})
+add_subdirectory(Reaper)
 
 if(TARGET IPlugEffect-vst3)
   set(VST3_SDK "${IPLUG2_DIR}/Dependencies/IPlug/VST3_SDK")
@@ -66,14 +72,14 @@ if(TARGET LinuxIdleProbe-vst3)
 endif()
 
 add_dependencies(LinuxGuiTest LinuxIdleProbe-app)
-foreach(mode idle close-order close-fail)
+foreach(mode idle close-order close-fail ui-thread callback-close)
   add_test(NAME linux-app-${mode}
     COMMAND "${XVFB_RUN}" -a "$<TARGET_FILE:LinuxGuiTest>"
       "$<TARGET_FILE:LinuxIdleProbe-app>" "$<TARGET_FILE:LinuxStartupHooks>" "${mode}")
   set_tests_properties(linux-app-${mode} PROPERTIES TIMEOUT 30 ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
 endforeach()
 
-foreach(mode normal timer-early timer-fail window-fail)
+foreach(mode normal main-loop timer-fail window-fail)
   add_test(NAME linux-${mode}
     COMMAND "${XVFB_RUN}" -a "$<TARGET_FILE:LinuxGuiTest>"
       "$<TARGET_FILE:IPlugEffect-app>" "$<TARGET_FILE:LinuxStartupHooks>" "${mode}")
@@ -86,6 +92,12 @@ add_test(NAME linux-vst3-sdk
     "-DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/sdk-check"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/CheckSDK.cmake")
 set_tests_properties(linux-vst3-sdk PROPERTIES TIMEOUT 60)
+
+add_test(NAME linux-webview-configuration
+  COMMAND "${CMAKE_COMMAND}" "-DIPLUG2_DIR=${IPLUG2_DIR}"
+    "-DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/webview-check"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/CheckWebView.cmake")
+set_tests_properties(linux-webview-configuration PROPERTIES TIMEOUT 60)
 
 add_test(NAME linux-deployment
   COMMAND "${CMAKE_COMMAND}" "-DIPLUG2_DIR=${IPLUG2_DIR}"
@@ -114,6 +126,10 @@ if(TARGET IPlugEffect-clap)
     set_tests_properties(linux-clap-${mode} PROPERTIES TIMEOUT 30
       ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;LD_PRELOAD=$<TARGET_FILE:LinuxStartupHooks>")
   endforeach()
+endif()
+
+if(TARGET LinuxClapHostTest)
+  add_subdirectory(WebView)
 endif()
 
 if(TARGET LinuxIdleProbe-clap)

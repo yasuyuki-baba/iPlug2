@@ -276,6 +276,21 @@ int main(int argc, char** argv)
     dlclose(library);
     return 1;
   }
+  if (mode == "editor-fail")
+  {
+    clap_window_t parent {};
+    parent.api = CLAP_WINDOW_API_X11;
+    parent.x11 = 1;
+    Check(!gui->set_parent(plugin, &parent), "non-IGraphics editor attach reports failure");
+    Check(!gui->show(plugin), "non-IGraphics editor show reports failure");
+    Check(!gui->set_parent(plugin, &parent), "failed editor attach can be retried safely");
+    gui->destroy(plugin);
+    host.CheckUnregistered();
+    plugin->destroy(plugin);
+    entry->deinit();
+    dlclose(library);
+    return sFailures ? 1 : 0;
+  }
   XInitThreads();
   Display* display = XOpenDisplay(nullptr);
   if (!display)

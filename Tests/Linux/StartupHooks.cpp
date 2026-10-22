@@ -43,6 +43,11 @@ extern "C" int pthread_create(pthread_t* thread, const pthread_attr_t* attribute
   }
   if (graphicsTimer)
   {
+    if (TestMode("main-loop") || TestMode("ui-thread") || TestMode("callback-close"))
+    {
+      fprintf(stderr, "Unexpected graphics worker creation\n");
+      return EAGAIN;
+    }
     snd_lib_error(__FILE__, __LINE__, __func__, 0, "Linux ALSA diagnostic regression");
     if (TestMode("timer-fail"))
     {

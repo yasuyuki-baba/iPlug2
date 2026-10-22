@@ -12,6 +12,7 @@ on:
       - 'IGraphics/**'
       - 'Examples/**/CMakeLists.txt'
       - 'Tests/**/CMakeLists.txt'
+      - 'Tests/Linux/**'
       - '.github/workflows/cmake-ci.yml'
   pull_request:
     branches: [master]
@@ -24,6 +25,7 @@ on:
       - 'IGraphics/**'
       - 'Examples/**/CMakeLists.txt'
       - 'Tests/**/CMakeLists.txt'
+      - 'Tests/Linux/**'
       - '.github/workflows/cmake-ci.yml'
   issue_comment:
     types: [created]
@@ -949,7 +951,7 @@ jobs:
         run: |
           cmake --build build/linux-regression --parallel 2 \
             --target IPlugEffect-app LinuxGuiTest LinuxStartupHooks \
-            LinuxDialogTest LinuxRuntimeTest LinuxClapHostTest LinuxVst3HostTest
+            LinuxDialogTest LinuxRuntimeTest LinuxClapHostTest LinuxVst3HostTest LinuxOscTest
 
       - name: Run Linux regression tests
         run: ctest --test-dir build/linux-regression --output-on-failure

@@ -1,12 +1,19 @@
 #include <X11/Xatom.h>
+#include <X11/keysym.h>
+#include <X11/Xresource.h>
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <cstdio>
 #include <cstring>
 #include <future>
+#include <string>
 #include <thread>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <dlfcn.h>
+#include <glad/glad.h>
+#include <GL/glx.h>
 
 #include "IGraphicsLinux.h"
 #include "IControls.h"
@@ -17,6 +24,83 @@ using namespace iplug::igraphics;
 using Clock = std::chrono::steady_clock;
 
 static int sFailures = 0;
+static bool sFailGLXActivation = false;
+static bool sDisableInputMethod = false;
+static unsigned sInputMethodAttempts = 0;
+static unsigned sInputContextsDestroyed = 0;
+static bool sWatchErrorHandler = false;
+static unsigned sErrorHandlerChanges = 0;
+static const char* sInputCommit = nullptr;
+static int sInputCommitStatus = XLookupChars;
+static unsigned sInputLookups = 0;
+
+extern "C" XIM XOpenIM(Display* display, XrmDatabase database, char* name, char* className)
+{
+  ++sInputMethodAttempts;
+  if (sDisableInputMethod)
+    return nullptr;
+  static auto open = reinterpret_cast<decltype(&XOpenIM)>(dlsym(RTLD_NEXT, "XOpenIM"));
+  if (!open)
+    abort();
+  return open(display, database, name, className);
+}
+
+extern "C" void XDestroyIC(XIC context)
+{
+  ++sInputContextsDestroyed;
+  static auto destroy = reinterpret_cast<decltype(&XDestroyIC)>(dlsym(RTLD_NEXT, "XDestroyIC"));
+  if (!destroy)
+    abort();
+  destroy(context);
+}
+
+extern "C" int Xutf8LookupString(XIC context, XKeyPressedEvent* event, char* buffer,
+                                 int capacity, KeySym* symbol, int* status)
+{
+  ++sInputLookups;
+  if (sInputCommit)
+  {
+    const int length = static_cast<int>(strlen(sInputCommit));
+    *symbol = sInputCommitStatus == XLookupChars ? XK_a : XK_Return;
+    *status = length > capacity ? XBufferOverflow : sInputCommitStatus;
+    if (length <= capacity)
+      memcpy(buffer, sInputCommit, length);
+    return length;
+  }
+  static auto lookup = reinterpret_cast<decltype(&Xutf8LookupString)>(
+    dlsym(RTLD_NEXT, "Xutf8LookupString"));
+  if (!lookup)
+    abort();
+  return lookup(context, event, buffer, capacity, symbol, status);
+}
+
+extern "C" XErrorHandler XSetErrorHandler(XErrorHandler handler)
+{
+  if (sWatchErrorHandler)
+    ++sErrorHandlerChanges;
+  static auto set = reinterpret_cast<decltype(&XSetErrorHandler)>(
+    dlsym(RTLD_NEXT, "XSetErrorHandler"));
+  if (!set)
+    abort();
+  return set(handler);
+}
+
+extern "C" int glXMakeCurrent(Display* display, GLXDrawable drawable, GLXContext context)
+{
+  if (sFailGLXActivation)
+  {
+    sFailGLXActivation = false;
+    return 0;
+  }
+  static auto makeCurrent = reinterpret_cast<int (*)(Display*, GLXDrawable, GLXContext)>(
+    dlsym(RTLD_NEXT, "glXMakeCurrent"));
+  if (!makeCurrent)
+  {
+    fprintf(stderr, "Could not resolve glXMakeCurrent\n");
+    abort();
+  }
+  return makeCurrent(display, drawable, context);
+}
 
 static void Check(bool condition, const char* message)
 {
@@ -67,6 +151,108 @@ public:
 private:
   const std::thread::id mMainThread = std::this_thread::get_id();
 };
+
+struct GLXState
+{
+  Display* display = glXGetCurrentDisplay();
+  GLXContext context = glXGetCurrentContext();
+  GLXDrawable draw = glXGetCurrentDrawable();
+  GLXDrawable read = glXGetCurrentReadDrawable();
+
+  void CheckCurrent(const char* message) const
+  {
+    Check(display == glXGetCurrentDisplay() && context == glXGetCurrentContext() &&
+          draw == glXGetCurrentDrawable() && read == glXGetCurrentReadDrawable(), message);
+  }
+};
+
+static void TestGLXContext()
+{
+  XInitThreads();
+  Display* display = XOpenDisplay(nullptr);
+  Check(display != nullptr, "open separate host GLX display");
+  if (!display)
+    return;
+  const int attributes[] = {GLX_DRAWABLE_TYPE, GLX_PBUFFER_BIT,
+                             GLX_RENDER_TYPE, GLX_RGBA_BIT, 0};
+  int count = 0;
+  GLXFBConfig* configs = glXChooseFBConfig(display, DefaultScreen(display), attributes, &count);
+  Check(configs && count > 0, "choose host GLX framebuffer configuration");
+  if (!configs || count == 0)
+  {
+    if (configs) XFree(configs);
+    XCloseDisplay(display);
+    return;
+  }
+  GLXContext context = glXCreateNewContext(display, configs[0], GLX_RGBA_TYPE, nullptr, 1);
+  const int size[] = {GLX_PBUFFER_WIDTH, 16, GLX_PBUFFER_HEIGHT, 16, 0};
+  const GLXPbuffer draw = glXCreatePbuffer(display, configs[0], size);
+  const GLXPbuffer read = glXCreatePbuffer(display, configs[0], size);
+  XFree(configs);
+  Check(context && draw && read && draw != read, "create host context with distinct draw/read buffers");
+  if (context && draw && read)
+  {
+    for (bool hostCurrent : {false, true})
+    {
+      Check(glXMakeContextCurrent(display, hostCurrent ? draw : 0, hostCurrent ? read : 0,
+                                  hostCurrent ? context : nullptr), "set initial host GLX state");
+      const GLXState host;
+      TestDelegate first(true), second(true);
+      Check(first.OpenWindow(nullptr) != nullptr, "open first editor with host GLX state");
+      host.CheckCurrent("editor initialization restores host GLX state");
+      Check(second.OpenWindow(nullptr) != nullptr, "open second editor with host GLX state");
+      host.CheckCurrent("second editor initialization restores host GLX state");
+      if (first.GetUI() && second.GetUI())
+      {
+        auto& graphics = *static_cast<IGraphicsLinux*>(first.GetUI());
+        auto& other = *static_cast<IGraphicsLinux*>(second.GetUI());
+        graphics.Resize(360, 260, 1.f);
+        host.CheckCurrent("resize restores host GLX state");
+        graphics.OnDisplayTimer();
+        host.CheckCurrent("render restores host GLX state");
+        {
+          IGraphics::ScopedGLContext outer {&graphics};
+          const GLXState firstState;
+          Check(firstState.context && firstState.context != context, "activate first editor context");
+          graphics.DrawResize();
+          firstState.CheckCurrent("nested framebuffer resize preserves editor context");
+          {
+            IGraphics::ScopedGLContext middle {&other};
+            const GLXState secondState;
+            Check(secondState.context && secondState.context != firstState.context,
+                  "activate different editor context");
+            {
+              IGraphics::ScopedGLContext inner {&graphics};
+              firstState.CheckCurrent("reenter first editor context");
+            }
+            secondState.CheckCurrent("nested editor scope restores second editor");
+          }
+          firstState.CheckCurrent("second editor scope restores first editor");
+        }
+        host.CheckCurrent("nested GLX scopes restore host state");
+        first.CloseWindow();
+        host.CheckCurrent("editor close restores host GLX state");
+        Check(first.OpenWindow(nullptr) != nullptr, "reopen first editor");
+        host.CheckCurrent("editor reopening restores host GLX state");
+      }
+      second.CloseWindow();
+      first.CloseWindow();
+      host.CheckCurrent("all editor teardown preserves host GLX state");
+
+      TestDelegate failed(true);
+      sFailGLXActivation = true;
+      Check(failed.OpenWindow(nullptr) == nullptr, "GLX activation failure rejects editor");
+      Check(!sFailGLXActivation, "GLX activation failure hook was exercised");
+      Check(!failed.GetUI(), "failed editor is cleaned up");
+      host.CheckCurrent("failed editor initialization preserves host GLX state");
+    }
+  }
+  glXMakeContextCurrent(display, 0, 0, nullptr);
+  if (context) glXDestroyContext(display, context);
+  if (draw) glXDestroyPbuffer(display, draw);
+  if (read) glXDestroyPbuffer(display, read);
+  XCloseDisplay(display);
+}
 
 static void TestClose()
 {
@@ -323,6 +509,241 @@ static int HostXErrorHandler(Display*, XErrorEvent*)
   return 0;
 }
 
+class KeyProbe final : public IControl
+{
+public:
+  KeyProbe() : IControl(IRECT(50, 40, 110, 90)) {}
+  void Draw(IGraphics&) override {}
+  bool OnKeyDown(float x, float y, const IKeyPress& key) override
+  {
+    mText += key.utf8;
+    mKeys.push_back(key.VK);
+    mX = x;
+    mY = y;
+    return true;
+  }
+  bool OnKeyUp(float, float, const IKeyPress& key) override
+  {
+    mReleasedText += key.utf8;
+    ++mReleases;
+    return true;
+  }
+  std::string mText;
+  std::string mReleasedText;
+  std::vector<int> mKeys;
+  unsigned mReleases = 0;
+  float mX = 0.f, mY = 0.f;
+};
+
+static void CheckText(const std::string& actual, const char* expected, const char* message)
+{
+  Check(actual == expected, message);
+  if (actual != expected)
+  {
+    fprintf(stderr, "Actual UTF-8 bytes:");
+    for (unsigned char byte : actual)
+      fprintf(stderr, " %02x", byte);
+    fprintf(stderr, "\n");
+  }
+}
+
+static void TestScaledKeys()
+{
+  TestDelegate delegate(true);
+  if (!delegate.OpenWindow(nullptr))
+  {
+    Check(false, "open editor for scaled host keys");
+    return;
+  }
+  auto& graphics = *static_cast<IGraphicsLinux*>(delegate.GetUI());
+  auto* probe = new KeyProbe();
+  graphics.AttachControl(probe);
+  Display* host = XOpenDisplay(nullptr);
+  Check(host != nullptr, "open pointer test connection");
+  if (!host)
+    return;
+  for (const auto scales : {std::pair<float, float>{1.f, 1.f}, {2.f, 1.f},
+                            {1.f, 1.5f}, {1.5f, 1.25f}})
+  {
+    graphics.Resize(320, 240, scales.second);
+    graphics.SetScreenScale(scales.first);
+    const float scale = graphics.GetTotalScale();
+    const Window window = reinterpret_cast<uintptr_t>(graphics.GetWindow());
+    XWarpPointer(host, 0, window, 0, 0, 0, 0,
+                 static_cast<int>(80 * scale), static_cast<int>(64 * scale));
+    XSync(host, 0);
+    float x = 0.f, y = 0.f;
+    graphics.GetMouseLocation(x, y);
+    Check(std::fabs(x - 80.f) < 0.01f && std::fabs(y - 64.f) < 0.01f,
+          "pointer coordinates include both screen and drawing scales");
+    Check(delegate.OnKeyDown(IKeyPress("a", kVK_A)), "host key down reaches the hovered control");
+    Check(delegate.OnKeyUp(IKeyPress("a", kVK_A)), "host key up reaches the hovered control");
+    Check(std::fabs(probe->mX - 80.f) < 0.01f && std::fabs(probe->mY - 64.f) < 0.01f,
+          "host key handler receives logical coordinates");
+  }
+  Check(probe->mText == "aaaa" && probe->mReleases == 4, "one key pair delivered at each scale");
+  XCloseDisplay(host);
+}
+
+static void SendKey(Display* host, IGraphicsLinux& graphics, unsigned keycode, int type = KeyPress)
+{
+  XEvent event {};
+  event.xkey.type = type;
+  event.xkey.display = host;
+  event.xkey.window = reinterpret_cast<uintptr_t>(graphics.GetWindow());
+  event.xkey.root = DefaultRootWindow(host);
+  event.xkey.keycode = keycode;
+  event.xkey.same_screen = 1;
+  Check(XSendEvent(host, event.xkey.window, 0,
+                  type == KeyPress ? KeyPressMask : KeyReleaseMask, &event),
+        "send keyboard event");
+  XSync(host, 0);
+  graphics.ProcessX11Events();
+}
+
+static void TestKeyboard(bool withoutIM, bool utf8Locale)
+{
+  Check(std::setlocale(LC_CTYPE, utf8Locale ? "C.UTF-8" : "C") != nullptr, "set the host locale");
+  const std::string locale = std::setlocale(LC_CTYPE, nullptr);
+  Check(XSetLocaleModifiers("@im=none") != nullptr, "use the local XIM Compose implementation");
+  sDisableInputMethod = withoutIM;
+  TestDelegate delegate(true);
+  Display* host = XOpenDisplay(nullptr);
+  Check(host != nullptr, "open keyboard test connection");
+  if (!host)
+    return;
+  int minimum = 0, maximum = 0, symbolsPerKey = 0;
+  XDisplayKeycodes(host, &minimum, &maximum);
+  const int firstKey = maximum - 7;
+  KeySym* previous = XGetKeyboardMapping(host, firstKey, 8, &symbolsPerKey);
+  Check(previous != nullptr, "save keyboard mapping");
+  if (!previous)
+  {
+    XCloseDisplay(host);
+    return;
+  }
+  KeySym symbols[] = {XK_a, XK_eacute, XK_Multi_key, XK_apostrophe, XK_e,
+                      0x01003042, XK_Return, XK_Left};
+  XChangeKeyboardMapping(host, firstKey, 1, symbols, 8);
+  XSync(host, 0);
+  const unsigned destroyedBefore = sInputContextsDestroyed;
+  for (unsigned iteration = 0; iteration < 2; ++iteration)
+  {
+    if (!delegate.OpenWindow(nullptr))
+    {
+      Check(false, "open keyboard editor");
+      break;
+    }
+    Check(locale == std::setlocale(LC_CTYPE, nullptr), "opening an editor preserves the host locale");
+    auto& graphics = *static_cast<IGraphicsLinux*>(delegate.GetUI());
+    auto* probe = new KeyProbe();
+    graphics.AttachControl(probe);
+    const Window window = reinterpret_cast<uintptr_t>(graphics.GetWindow());
+    XSetInputFocus(host, window, RevertToParent, 0);
+    XEvent motion {};
+    motion.xmotion.type = MotionNotify;
+    motion.xmotion.display = host;
+    motion.xmotion.window = window;
+    motion.xmotion.x = 80;
+    motion.xmotion.y = 64;
+    motion.xmotion.same_screen = 1;
+    Check(XSendEvent(host, window, 0, PointerMotionMask, &motion), "position keyboard target");
+    XSync(host, 0);
+    graphics.ProcessX11Events();
+    SendKey(host, graphics, firstKey);
+    SendKey(host, graphics, firstKey, KeyRelease);
+    SendKey(host, graphics, firstKey + 1);
+    SendKey(host, graphics, firstKey + 1, KeyRelease);
+    SendKey(host, graphics, firstKey + 5);
+    CheckText(probe->mText, "a\xc3\xa9\xe3\x81\x82", "ASCII, Latin-1 and Unicode keysyms produce UTF-8");
+    CheckText(probe->mReleasedText, "a\xc3\xa9", "key releases also contain valid UTF-8");
+    if (!withoutIM)
+    {
+      Check(sInputLookups > 0, "key presses use the input context");
+      probe->mText.clear();
+      SendKey(host, graphics, firstKey + 2);
+      SendKey(host, graphics, firstKey + 3);
+      Check(probe->mText.empty(), "Compose prefixes do not insert text");
+      SendKey(host, graphics, firstKey + 4);
+      Check(probe->mText == "\xc3\xa9", "Compose apostrophe plus e commits an accented character");
+
+      std::string phrase;
+      for (unsigned i = 0; i < 30; ++i)
+        phrase += "\xe6\x97\xa5";
+      phrase += "\xf0\x9f\x8e\xb5";
+      probe->mText.clear();
+      probe->mKeys.clear();
+      const unsigned lookups = sInputLookups;
+      sInputCommit = phrase.c_str();
+      sInputCommitStatus = iteration ? XLookupBoth : XLookupChars;
+      SendKey(host, graphics, firstKey);
+      sInputCommit = nullptr;
+      Check(sInputLookups == lookups + 2, "retry an IME commit after XBufferOverflow");
+      Check(probe->mText == phrase && probe->mKeys.size() == 31,
+            "deliver an entire Japanese phrase and a four-byte codepoint without truncation");
+      for (int key : probe->mKeys)
+        Check(key == kVK_NONE, "IME phrases do not carry unspecified or candidate-acceptance keys");
+    }
+    probe->mKeys.clear();
+    SendKey(host, graphics, firstKey + 7);
+    Check(probe->mKeys.size() == 1 && probe->mKeys[0] == kVK_LEFT,
+          "non-text navigation keys retain virtual key codes");
+    delegate.CloseWindow();
+    Check(locale == std::setlocale(LC_CTYPE, nullptr), "closing an editor preserves the host locale");
+    Check(sInputContextsDestroyed == destroyedBefore + (withoutIM ? 0 : iteration + 1),
+          "close destroys each input context exactly once before reopening");
+  }
+  Check(sInputMethodAttempts == 2, "each reopened editor initializes its own input method");
+  if (withoutIM)
+    Check(sInputLookups == 0, "unavailable IM uses the explicit UTF-8 fallback");
+  XChangeKeyboardMapping(host, firstKey, symbolsPerKey, previous, 8);
+  XFree(previous);
+  XCloseDisplay(host);
+}
+
+static void TestParentValidation()
+{
+  XInitThreads();
+  Display* host = XOpenDisplay(nullptr);
+  Check(host != nullptr, "open parent validation host");
+  if (!host)
+    return;
+  const Window parent = XCreateSimpleWindow(host, DefaultRootWindow(host), 0, 0, 400, 300, 0, 0, 0);
+  const Window destroyed = XCreateSimpleWindow(host, DefaultRootWindow(host), 0, 0, 1, 1, 0, 0, 0);
+  XMapWindow(host, parent);
+  XDestroyWindow(host, destroyed);
+  XSync(host, 0);
+  XErrorHandler previous = XSetErrorHandler(HostXErrorHandler);
+  sWatchErrorHandler = true;
+  for (const uintptr_t value : {static_cast<uintptr_t>(parent), static_cast<uintptr_t>(destroyed),
+                                static_cast<uintptr_t>(UINT32_MAX) + 1})
+  {
+    TestDelegate delegate(true);
+    void* editor = delegate.OpenWindow(reinterpret_cast<void*>(value));
+    Check(editor != nullptr, "valid parent embeds and invalid parent safely falls back");
+    if (editor)
+    {
+      Window root = 0, actualParent = 0, *children = nullptr;
+      unsigned count = 0;
+      Check(XQueryTree(host, reinterpret_cast<uintptr_t>(editor), &root, &actualParent, &children, &count),
+            "query editor parent");
+      Check(actualParent == (value == parent ? parent : DefaultRootWindow(host)),
+            "only a valid 32-bit X11 parent is used");
+      if (children)
+        XFree(children);
+    }
+    XDestroyWindow(host, destroyed);
+    XSync(host, 0);
+    delegate.CloseWindow();
+  }
+  sWatchErrorHandler = false;
+  Check(sErrorHandlerChanges == 0, "editor creation never changes the process-wide X11 error handler");
+  Check(sHostXErrors == 3, "only unrelated host errors reach the host handler");
+  Check(XSetErrorHandler(previous) == HostXErrorHandler, "parent validation preserves the host handler");
+  XDestroyWindow(host, parent);
+  XCloseDisplay(host);
+}
+
 static void TestDisappearingClipboardRequestor(bool hostHandler)
 {
   TestDelegate owner(true);
@@ -456,6 +877,15 @@ int main(int argc, char** argv)
     return 1;
   if (strcmp(argv[1], "close") == 0)
     TestClose();
+  else if (strcmp(argv[1], "glx-context") == 0)
+    TestGLXContext();
+  else if (strcmp(argv[1], "scaled-keys") == 0)
+    TestScaledKeys();
+  else if (strcmp(argv[1], "keyboard") == 0 || strcmp(argv[1], "keyboard-no-im") == 0 ||
+           strcmp(argv[1], "keyboard-no-im-c") == 0)
+    TestKeyboard(strcmp(argv[1], "keyboard") != 0, strcmp(argv[1], "keyboard-no-im-c") != 0);
+  else if (strcmp(argv[1], "parent-validation") == 0)
+    TestParentValidation();
   else if (strcmp(argv[1], "clipboard") == 0)
     TestClipboard();
   else if (strcmp(argv[1], "clipboard-instances") == 0)

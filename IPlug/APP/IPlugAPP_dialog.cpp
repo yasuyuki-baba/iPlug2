@@ -668,7 +668,11 @@ WDL_DLGRET IPlugAPPHost::MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
         SaveWindowScreenshot(gHWND, pAppHost->GetScreenshotPath());
 
         // Exit the application
+#ifdef OS_LINUX
+        gStandaloneCloseRequested = true;
+#else
         DestroyWindow(hwndDlg);
+#endif
         return 0;
       }
       break;
@@ -690,14 +694,22 @@ WDL_DLGRET IPlugAPPHost::MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
 
       return 0;
     case WM_CLOSE:
+#ifdef OS_LINUX
+      gStandaloneCloseRequested = true;
+#else
       DestroyWindow(hwndDlg);
+#endif
       return 0;
     case WM_COMMAND:
       switch (LOWORD(wParam))
       {
         case ID_QUIT:
         {
+#ifdef OS_LINUX
+          gStandaloneCloseRequested = true;
+#else
           DestroyWindow(hwndDlg);
+#endif
           return 0;
         }
         case ID_ABOUT:

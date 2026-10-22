@@ -72,6 +72,7 @@ extern HWND gHWND;
 extern HINSTANCE gHINSTANCE;
 #ifdef OS_LINUX
 extern int gStandaloneExitStatus;
+extern bool gStandaloneCloseRequested;
 #endif
 
 BEGIN_IPLUG_NAMESPACE

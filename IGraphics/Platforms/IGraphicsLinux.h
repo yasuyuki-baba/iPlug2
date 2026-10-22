@@ -60,6 +60,8 @@
 // GL/glx.h must be included BEFORE this header (in the .cpp file) while Bool
 // is still defined from Xlib.h; the GLX_H include guard prevents re-inclusion.
 #include <atomic>
+#include <vector>
+#include "IPlugTimer.h"
 #include "IGraphics_select.h"
 
 BEGIN_IPLUG_NAMESPACE
@@ -83,9 +85,9 @@ public:
    *  Used by CLAP posix-fd support to register with the host's event loop. */
   int GetX11Fd() const { return mDisplay ? XConnectionNumber(mDisplay) : -1; }
 
-  /** When host-driven = true the internal timer thread is suppressed.
+  /** When host-driven = true the internal timer is suppressed.
    *  The host drives rendering via onTimer / onPosixFd callbacks instead.
-   *  Safe to call after OpenWindow — stops the timer thread if running. */
+   *  Safe to call after OpenWindow — stops the internal timer if running. */
   void SetHostDriven(bool hostDriven)
   {
     mHostDriven = hostDriven;
@@ -99,6 +101,8 @@ public:
   void ProcessX11Events();
   /** A native close is completed by the owner after X11 dispatch returns. */
   bool WindowCloseRequested() const { return mCloseRequested; }
+  void RequestWindowClose() { mCloseRequested = true; }
+  bool IsInPlatformCallback() const { return mDispatchDepth != 0; }
 
   void PlatformResize(bool parentHasResized) override;
   void DrawResize() override;
@@ -136,6 +140,17 @@ protected:
   void CreatePlatformTextEntry(int paramIdx, const IText& text, const IRECT& bounds, int length, const char* str) override;
 
 private:
+  struct DispatchScope
+  {
+    explicit DispatchScope(int& depth) : mDepth(depth) { ++mDepth; }
+    ~DispatchScope() { --mDepth; }
+    int& mDepth;
+  };
+
+  void DispatchX11Events();
+  void DispatchKeyEvent(XKeyEvent& event);
+  void CreateInputContext();
+  void DestroyInputContext();
   PlatformFontPtr LoadPlatformFont(const char* fontID, const char* fileNameOrResID) override;
   PlatformFontPtr LoadPlatformFont(const char* fontID, const char* fontName, ETextStyle style) override;
   PlatformFontPtr LoadPlatformFont(const char* fontID, void* pData, int dataSize) override;
@@ -144,12 +159,23 @@ private:
   void ActivateGLContext() override;
   void DeactivateGLContext() override;
 
+  struct GLContextState
+  {
+    Display* display;
+    void* context;
+    unsigned long drawable;
+    unsigned long readDrawable;
+  };
+  std::vector<GLContextState> mGLContextStack;
+
   XVisualInfo* CreateGLContext();  // returns the visual used; caller must XFree() it
   void DestroyGLContext();
   void* mGLContext  = nullptr;  // GLXContext
   Colormap mGLColormap = 0;
 
   Display* mDisplay = nullptr;
+  XIM mInputMethod = nullptr;
+  XIC mInputContext = nullptr;
   Window mPlugWnd = 0;
   Window mParentWnd = 0;
   Atom mWMDeleteMessage = 0;
@@ -160,6 +186,7 @@ private:
   Cursor mBlankCursor = 0;  // cached invisible cursor for HideMouseCursor
   bool mNeedsRedraw = false;
   bool mCloseRequested = false;
+  int mDispatchDepth = 0;
   unsigned long mLastLeftClickTime = 0;  // X11 server timestamp of last left-button press
 
   // Clipboard atoms (interned in OpenWindow)
@@ -175,6 +202,7 @@ private:
 
   static void* TimerThreadProc(void* pParam);
   pthread_t mTimerThread = 0;
+  std::unique_ptr<Timer> mMainLoopTimer;
 };
 
 END_IGRAPHICS_NAMESPACE

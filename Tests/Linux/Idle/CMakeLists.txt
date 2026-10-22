@@ -27,3 +27,5 @@ foreach(format vst3 clap)
 endforeach()
 
 set_target_properties(LinuxIdleProbe-app PROPERTIES ENABLE_EXPORTS ON)
+pkg_check_modules(PROBE_GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
+target_link_libraries(LinuxIdleProbe-app PRIVATE PkgConfig::PROBE_GTK)

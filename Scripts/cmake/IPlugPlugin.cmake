@@ -511,6 +511,10 @@ macro(iplug_add_plugin plugin_name)
   endif()
 
   # Determine UI library and include necessary modules
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND "iPlug2::Extras::IWebViewControl" IN_LIST PLUGIN_LINK)
+    message(FATAL_ERROR "iplug_add_plugin(${plugin_name}): IWebViewControl is not implemented on Linux. Remove the WebView control and its LINK dependency.")
+  endif()
+
   if(PLUGIN_UI STREQUAL "IGRAPHICS")
     set(_iplug_ui_lib ${IGRAPHICS_LIB})
   elseif(PLUGIN_UI STREQUAL "WEBVIEW")

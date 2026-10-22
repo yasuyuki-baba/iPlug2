@@ -9,6 +9,10 @@
 # WebView configuration for iPlug2
 # This module provides WebViewEditorDelegate for plugins that use WebView UI instead of IGraphics
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  message(FATAL_ERROR "WebView is not implemented on Linux. Use UI IGRAPHICS or UI NONE instead.")
+endif()
+
 include(${CMAKE_CURRENT_LIST_DIR}/IPlug.cmake)
 
 if(NOT TARGET iPlug2::WebView)
@@ -89,11 +93,6 @@ if(NOT TARGET iPlug2::WebView)
       ${WEBVIEW_DIR}/IPlugWebViewEditorDelegate.cpp
       ${WEBVIEW_DIR}/IPlugWebView_web.cpp
     )
-  elseif(UNIX AND NOT APPLE)
-    set(WEBVIEW_SRC
-      ${WEBVIEW_DIR}/IPlugWebViewEditorDelegate.cpp
-      ${WEBVIEW_DIR}/IPlugWebView_linux.cpp
-    )
   endif()
 
   target_sources(iPlug2::WebView INTERFACE ${WEBVIEW_SRC})
@@ -131,7 +130,5 @@ if(NOT TARGET iPlug2::WebView)
     target_link_libraries(iPlug2::WebView INTERFACE
       iPlug2::IPlug
     )
-  elseif(UNIX AND NOT APPLE)
-    target_link_libraries(iPlug2::WebView INTERFACE iPlug2::IPlug)
   endif()
 endif()

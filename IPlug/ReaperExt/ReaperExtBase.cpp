@@ -2,15 +2,13 @@
 #define IPLUG_STRINGIFY_HELPER(x) #x
 #define IPLUG_STRINGIFY(x) IPLUG_STRINGIFY_HELPER(x)
 
-#if defined OS_LINUX && !defined NO_IGRAPHICS
-static constexpr UINT_PTR kLinuxCloseTimer = 0x49504C43;
-#endif
-
 ReaperExtBase::ReaperExtBase(reaper_plugin_info_t* pRec)
 : EDITOR_DELEGATE_CLASS(0) // zero params
 , mRec(pRec)
 {
+#ifndef OS_LINUX
   mTimer = std::unique_ptr<Timer>(Timer::Create(std::bind(&ReaperExtBase::OnTimer, this, std::placeholders::_1), IDLE_TIMER_RATE));
+#endif
   mDockId.Set(IPLUG_STRINGIFY(PLUG_CLASS_NAME));
   mMenuName.Set(IPLUG_STRINGIFY(PLUG_CLASS_NAME));
   memset(&mDockState, 0, sizeof(ReaperExtDockState));
@@ -19,7 +17,8 @@ ReaperExtBase::ReaperExtBase(reaper_plugin_info_t* pRec)
 
 ReaperExtBase::~ReaperExtBase()
 {
-  mTimer->Stop();
+  if (mTimer)
+    mTimer->Stop();
   if (gHWND)
   {
     mSaveStateOnDestroy = false;
@@ -29,8 +28,27 @@ ReaperExtBase::~ReaperExtBase()
 
 void ReaperExtBase::OnTimer(Timer& t)
 {
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+  if (GetUI() && static_cast<IGraphicsLinux*>(GetUI())->IsInPlatformCallback())
+    return;
+  const auto action = mPendingWindowAction;
+  mPendingWindowAction = EWindowAction::None;
+  if (action == EWindowAction::ToggleDock)
+    ToggleDocking();
+  else if (action == EWindowAction::Hide ||
+           (GetUI() && static_cast<IGraphicsLinux*>(GetUI())->WindowCloseRequested()))
+    DestroyMainWindow();
+#endif
   OnIdle();
 }
+
+#ifdef OS_LINUX
+bool ReaperExtBase::StartMainThreadTimer()
+{
+  mTimer.reset(SWELLTimer::Create([this](Timer& timer) { OnTimer(timer); }, IDLE_TIMER_RATE));
+  return mTimer != nullptr;
+}
+#endif
 
 auto ClientResize = [](HWND hWnd, int nWidth, int nHeight) {
   RECT rcClient, rcWindow;
@@ -107,6 +125,14 @@ void ReaperExtBase::UpdateToggleStates()
 
 void ReaperExtBase::DestroyMainWindow()
 {
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+  if (GetUI() && static_cast<IGraphicsLinux*>(GetUI())->IsInPlatformCallback())
+  {
+    mPendingWindowAction = EWindowAction::Hide;
+    static_cast<IGraphicsLinux*>(GetUI())->RequestWindowClose();
+    return;
+  }
+#endif
   if (gHWND == NULL)
     return;
 
@@ -135,6 +161,14 @@ void ReaperExtBase::ShowHideMainWindow()
 
 void ReaperExtBase::ToggleDocking()
 {
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+  if (GetUI() && static_cast<IGraphicsLinux*>(GetUI())->IsInPlatformCallback())
+  {
+    mPendingWindowAction = EWindowAction::ToggleDock;
+    static_cast<IGraphicsLinux*>(GetUI())->RequestWindowClose();
+    return;
+  }
+#endif
   EnsureStateLoaded();
 
   // With no window open, just flip the persisted preference so the next open honours it
@@ -435,11 +469,31 @@ WDL_DLGRET ReaperExtBase::MainDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
         ShowWindow(hwnd, SW_SHOW);
       }
 
-      gPlug->OpenWindow(hwnd);
-
 #if defined OS_LINUX && !defined NO_IGRAPHICS
-      if (!SetTimer(hwnd, kLinuxCloseTimer, IDLE_TIMER_RATE, nullptr))
-        fprintf(stderr, "Could not schedule REAPER extension native-close dispatch\n");
+      RECT client;
+      GetClientRect(hwnd, &client);
+      void* x11Parent = nullptr;
+      gPlug->mXBridge = SWELL_CreateXBridgeWindow(hwnd, &x11Parent, &client);
+      if (!gPlug->mXBridge || !x11Parent)
+      {
+        fprintf(stderr, "Could not create the REAPER extension X11 bridge\n");
+        DestroyWindow(hwnd);
+        return 0;
+      }
+      ShowWindow(gPlug->mXBridge, SW_SHOW);
+      // The bridge's size query synchronizes its X11 connection before the
+      // editor accesses the new parent through a separate connection.
+      int width = 0, height = 0;
+      SendMessage(gPlug->mXBridge, WM_USER + 1000,
+                  reinterpret_cast<WPARAM>(&width), reinterpret_cast<LPARAM>(&height));
+      if (!gPlug->OpenWindow(x11Parent))
+      {
+        fprintf(stderr, "Could not attach the REAPER extension editor to its X11 bridge\n");
+        DestroyWindow(hwnd);
+        return 0;
+      }
+#else
+      gPlug->OpenWindow(hwnd);
 #endif
 
       // Trigger initial resize now that IGraphics exists
@@ -468,7 +522,8 @@ WDL_DLGRET ReaperExtBase::MainDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
     case WM_DESTROY:
     {
 #if defined OS_LINUX && !defined NO_IGRAPHICS
-      KillTimer(hwnd, kLinuxCloseTimer);
+      gPlug->CloseWindow();
+      gPlug->mXBridge = nullptr;
 #endif
       if (gPlug->mSaveStateOnDestroy)
         gPlug->SaveDockState();
@@ -478,12 +533,6 @@ WDL_DLGRET ReaperExtBase::MainDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
       gPlug->UpdateToggleStates(); // also covers the user closing the window directly
       return 0;
     }
-#if defined OS_LINUX && !defined NO_IGRAPHICS
-    case WM_TIMER:
-      if (wParam == kLinuxCloseTimer && gPlug->CloseWindowIfRequested())
-        DestroyWindow(hwnd);
-      return 0;
-#endif
     case WM_SIZE:
     {
 #ifndef NO_IGRAPHICS
@@ -494,6 +543,10 @@ WDL_DLGRET ReaperExtBase::MainDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
         GetClientRect(hwnd, &r);
         int w = r.right - r.left;
         int h = r.bottom - r.top;
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+        if (gPlug->mXBridge && w > 0 && h > 0)
+          SetWindowPos(gPlug->mXBridge, nullptr, 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+#endif
 #ifdef WEBVIEW_EDITOR_DELEGATE
         // See WM_INITDIALOG: convert physical client size to logical for the WebView delegate.
         const float scale = GetScaleForHWND(hwnd);
@@ -506,8 +559,12 @@ WDL_DLGRET ReaperExtBase::MainDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
       return 0;
     }
     case WM_CLOSE:
+#ifdef OS_LINUX
+      gPlug->DestroyMainWindow();
+#else
       gPlug->CloseWindow();
       DestroyWindow(hwnd);
+#endif
       return 0;
   }
   return 0;

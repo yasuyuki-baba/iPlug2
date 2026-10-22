@@ -108,6 +108,23 @@ static bool Run(Display* display, const char* app, const char* hooks, const char
       if (editor && IsRendered(display, editor))
       {
         rendered = true;
+        if (strcmp(mode, "ui-thread") == 0 || strcmp(mode, "callback-close") == 0)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          XEvent event {};
+          event.xbutton.type = ButtonPress;
+          event.xbutton.display = display;
+          event.xbutton.window = editor;
+          event.xbutton.button = Button1;
+          event.xbutton.x = 250;
+          event.xbutton.y = 250;
+          event.xbutton.time = 1000;
+          XSendEvent(display, editor, False, ButtonPressMask, &event);
+          event.xbutton.type = ButtonRelease;
+          XSendEvent(display, editor, False, ButtonReleaseMask, &event);
+          XSync(display, False);
+          std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
         if (idleProbe)
           std::this_thread::sleep_for(std::chrono::milliseconds(150));
         if (strcmp(mode, "close-order") == 0)
@@ -115,7 +132,8 @@ static bool Run(Display* display, const char* app, const char* hooks, const char
           SendNativeClose(display, editor);
           std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
-        CloseWindow(display, window);
+        if (strcmp(mode, "ui-thread") != 0)
+          CloseWindow(display, window);
         closeSent = true;
       }
     }
@@ -139,16 +157,23 @@ static bool Run(Display* display, const char* app, const char* hooks, const char
   else
     passed &= log.find("Linux ALSA diagnostic regression") != std::string::npos;
   if (strcmp(mode, "timer-fail") == 0)
-    passed &= log.find("Could not start Linux graphics timer") != std::string::npos;
-  if (strcmp(mode, "timer-early") == 0)
-    passed &= log.find("Injected early graphics timer scheduling") != std::string::npos;
+    passed &= log.find("Could not start Linux graphics main-loop timer") != std::string::npos;
+  passed &= log.find("Unexpected graphics worker creation") == std::string::npos;
   if (strcmp(mode, "idle") == 0)
   {
     passed &= log.find("Linux idle probe: main=1") != std::string::npos;
     passed &= log.find("Linux idle message: main=1") != std::string::npos;
     passed &= log.find("wrong-thread=0") != std::string::npos;
   }
-  if (strcmp(mode, "idle") == 0 || strcmp(mode, "close-order") == 0 || strcmp(mode, "close-fail") == 0)
+  if (strcmp(mode, "ui-thread") == 0 || strcmp(mode, "callback-close") == 0)
+  {
+    passed &= log.find("Linux UI callback: main=1 alive=1") != std::string::npos;
+    passed &= log.find("Linux UI draw: main=1") != std::string::npos;
+  }
+  if (strcmp(mode, "ui-thread") == 0)
+    passed &= log.find("Linux UI dialog: main=1 accepted=1") != std::string::npos;
+  if (strcmp(mode, "idle") == 0 || strcmp(mode, "close-order") == 0 || strcmp(mode, "close-fail") == 0 ||
+      strcmp(mode, "ui-thread") == 0 || strcmp(mode, "callback-close") == 0)
     passed &= log.find("Linux close probe: opens=1 closes=1 errors=0") != std::string::npos;
   printf("%s: %s\n%s", mode, passed ? "PASS" : "FAIL", log.c_str());
   if (!passed)

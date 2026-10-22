@@ -35,6 +35,13 @@ IGEditorDelegate::~IGEditorDelegate()
 void* IGEditorDelegate::OpenWindow(void* pParent)
 {
   IPLUG_GFX_LOCK;
+#ifdef OS_LINUX
+  if (mGraphics && static_cast<IGraphicsLinux*>(mGraphics.get())->IsInPlatformCallback())
+  {
+    fprintf(stderr, "Cannot reopen the Linux editor during graphics dispatch\n");
+    return nullptr;
+  }
+#endif
   if(!mGraphics)
   {
     mGraphics = std::unique_ptr<IGraphics>(CreateGraphics());
@@ -61,6 +68,12 @@ void IGEditorDelegate::CloseWindow()
 #ifdef OS_LINUX
   if (!mGraphics)
     return;
+  auto* graphics = static_cast<IGraphicsLinux*>(mGraphics.get());
+  if (graphics->IsInPlatformCallback())
+  {
+    graphics->RequestWindowClose();
+    return;
+  }
 #endif
   if (!mClosing)
   {
@@ -89,7 +102,8 @@ void IGEditorDelegate::CloseWindow()
 bool IGEditorDelegate::CloseWindowIfRequested()
 {
   IPLUG_GFX_LOCK;
-  if (mGraphics && static_cast<IGraphicsLinux*>(mGraphics.get())->WindowCloseRequested())
+  if (mGraphics && !static_cast<IGraphicsLinux*>(mGraphics.get())->IsInPlatformCallback() &&
+      static_cast<IGraphicsLinux*>(mGraphics.get())->WindowCloseRequested())
   {
     CloseWindow();
     return true;

@@ -231,7 +231,7 @@ if(NOT TARGET iPlug2_Extras_IWebViewControl_obj)
   endif()
 endif()
 
-if(NOT TARGET iPlug2::Extras::IWebViewControl)
+if(NOT TARGET iPlug2::Extras::IWebViewControl AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_library(iPlug2::Extras::IWebViewControl INTERFACE IMPORTED)
 
   if(WIN32)
@@ -294,10 +294,6 @@ if(NOT TARGET iPlug2::Extras::IWebViewControl)
   elseif(APPLE)
     target_sources(iPlug2::Extras::IWebViewControl INTERFACE
       $<TARGET_OBJECTS:iPlug2_Extras_IWebViewControl_obj>
-    )
-  elseif(UNIX AND NOT APPLE)
-    target_sources(iPlug2::Extras::IWebViewControl INTERFACE
-      ${IPLUG_DIR}/Extras/WebView/IPlugWebView_linux.cpp
     )
   endif()
 

@@ -71,6 +71,11 @@ bool IPlugAPPHost::Init()
     return false;
   
 #ifdef OS_LINUX
+  if (!mIPlug->MainThreadTimerIsRunning())
+  {
+    fprintf(stderr, "Standalone main-thread dispatch is unavailable\n");
+    return false;
+  }
   if (!TryToChangeAudioDriverType())
   {
     fprintf(stderr, "Could not initialize audio driver %u\n", mState.mAudioDriverType);
