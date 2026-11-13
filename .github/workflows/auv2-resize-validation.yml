@@ -1,0 +1,43 @@
+name: AUv2 Cocoa resize validation
+on:
+  push:
+    branches: [validation/auv2-host-resize]
+permissions:
+  contents: read
+jobs:
+  cocoa-resize:
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        renderer: [METAL, GL3]
+    env:
+      RESIZE_RENDERER: ${{ matrix.renderer }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 4
+          submodules: recursive
+      - name: Build and run candidate Cocoa regression
+        run: |
+          cmake -S Tests/IGraphicsMacResize -B build/resize-candidate -DCMAKE_BUILD_TYPE=Debug -DIGRAPHICS_RENDERER="$RESIZE_RENDERER"
+          cmake --build build/resize-candidate --target IGraphicsMacResize --parallel 3
+          ctest --test-dir build/resize-candidate --output-on-failure
+      - name: Reproduce missing callback on upstream master
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/auv2-before" 0cf04038e945bec0a4029090573dbb211bda1131
+          cp -R Tests/IGraphicsMacResize "$RUNNER_TEMP/auv2-before/Tests/"
+          cmake -S "$RUNNER_TEMP/auv2-before/Tests/IGraphicsMacResize" -B build/resize-before -DCMAKE_BUILD_TYPE=Debug -DIGRAPHICS_RENDERER="$RESIZE_RENDERER"
+          cmake --build build/resize-before --target IGraphicsMacResize --parallel 3
+          if ctest --test-dir build/resize-before --output-on-failure; then
+            echo 'Expected the upstream parent-resize regression to fail'
+            exit 1
+          fi
+          python3 -c 'from pathlib import Path; assert "Parent resize was not reported once" in Path("build/resize-before/Testing/Temporary/LastTest.log").read_text()'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resize-${{ matrix.renderer }}-logs
+          path: |
+            build/resize-candidate/Testing/
+            build/resize-before/Testing/
