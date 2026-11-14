@@ -17,6 +17,8 @@
  * @copydoc IPlugCLAP
  */
 
+#include <atomic>
+
 #include "IPlugAPIBase.h"
 #include "IPlugProcessor.h"
 #include "plugin.hh"
@@ -94,6 +96,8 @@ public:
   
   // IPlugProcessor
   void SetTailSize(int tailSize) override;
+  // Processor latency changes immediately; CLAP reports it at the next activation.
+  // Plug-ins must coordinate their own DSP reconfiguration with that restart.
   void SetLatency(int samples) override;
   bool SendMidiMsg(const IMidiMsg& msg) override;
   bool SendSysEx(const ISysEx& msg) override;
@@ -110,7 +114,7 @@ private:
   
   // clap_plugin_latency
   bool implementsLatency() const noexcept override { return true; }
-  uint32_t latencyGet() const noexcept override { return GetLatency(); }
+  uint32_t latencyGet() const noexcept override { return mActiveLatency; }
   
   // clap_plugin_tail
   bool implementsTail() const noexcept override { return true; }
@@ -229,7 +233,10 @@ private:
   int mTailCount = 0;
   bool mHostHasTail = false;
   bool mTailUpdate = false;
-  bool mLatencyUpdate = false;
+  // The host observes a stable latency until the next activation.
+  int mActiveLatency = 0;
+  std::atomic<bool> mLatencyActive {false};
+  std::atomic<bool> mLatencyRestartPending {false};
   
   void* mWindow = nullptr;
   bool mGUIOpen = false;
