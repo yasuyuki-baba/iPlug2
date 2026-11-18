@@ -18,14 +18,13 @@
  
  Notes:
  
- App settings are stored in a .ini (text) file. The location is as follows:
- 
- Windows7: C:\Users\USERNAME\AppData\Local\BUNDLE_NAME\settings.ini
- Windows XP/Vista: C:\Documents and Settings\USERNAME\Local Settings\Application Data\BUNDLE_NAME\settings.ini
- macOS: /Users/USERNAME/Library/Application\ Support/BUNDLE_NAME/settings.ini
- OR
- /Users/USERNAME/Library/Containers/BUNDLE_ID/Data/Library/Application Support/BUNDLE_NAME/settings.ini
- 
+ App settings are stored in settings.ini under APP_SETTINGS_SUBPATH, which
+ defaults to BUNDLE_NAME.
+
+ Windows: %LOCALAPPDATA%/APP_SETTINGS_SUBPATH/settings.ini
+ macOS: ~/Library/Application Support/APP_SETTINGS_SUBPATH/settings.ini
+ Linux: $XDG_CONFIG_HOME/APP_SETTINGS_SUBPATH/settings.ini (defaults to ~/.config)
+
  */
 
 #include <cstdlib>
@@ -44,6 +43,14 @@
 #include "IPlugAPP.h"
 
 #include "config.h"
+
+#ifndef APP_SETTINGS_SUBPATH
+  #define APP_SETTINGS_SUBPATH BUNDLE_NAME
+#endif
+
+#ifndef APP_WINDOW_NAME
+  #define APP_WINDOW_NAME BUNDLE_NAME
+#endif
 
 #ifdef OS_WIN
   #include <WindowsX.h>

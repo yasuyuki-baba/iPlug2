@@ -152,20 +152,20 @@ bool IPlugAPPHost::InitState()
 #if defined OS_WIN
   char strPath[MAX_PATH_LEN];
   SHGetSpecialFolderPathUTF8(NULL, strPath, MAX_PATH_LEN, CSIDL_LOCAL_APPDATA, FALSE);
-  mINIPath.SetFormatted(MAX_PATH_LEN, "%s\\%s\\", strPath, BUNDLE_NAME);
+  mINIPath.SetFormatted(MAX_PATH_LEN, "%s\\%s\\", strPath, APP_SETTINGS_SUBPATH);
 #elif defined OS_MAC
   const char* home = getenv("HOME");
   if (!home || !home[0])
     return false;
-  mINIPath.SetFormatted(MAX_PATH_LEN, "%s/Library/Application Support/%s/", home, BUNDLE_NAME);
+  mINIPath.SetFormatted(MAX_PATH_LEN, "%s/Library/Application Support/%s/", home, APP_SETTINGS_SUBPATH);
 #elif defined OS_LINUX
   const char* xdgConfig = getenv("XDG_CONFIG_HOME");
   const char* home = getenv("HOME");
   std::filesystem::path directory;
   if (IsSafeAbsoluteDir(xdgConfig))
-    directory = std::filesystem::path(xdgConfig) / BUNDLE_NAME;
+    directory = std::filesystem::path(xdgConfig) / APP_SETTINGS_SUBPATH;
   else if (IsSafeAbsoluteDir(home))
-    directory = std::filesystem::path(home) / ".config" / BUNDLE_NAME;
+    directory = std::filesystem::path(home) / ".config" / APP_SETTINGS_SUBPATH;
   else
   {
     fprintf(stderr, "Cannot resolve settings directory: a safe absolute XDG_CONFIG_HOME or HOME is required\n");

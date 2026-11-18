@@ -141,8 +141,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpszCmdPa
       hMutex = CreateMutex(0, 0, BUNDLE_NAME);
     else
     {
-      HWND hWnd = FindWindow(0, BUNDLE_NAME);
-      SetForegroundWindow(hWnd);
+      HWND hWnd = FindWindow(0, APP_WINDOW_NAME);
+      if (!hWnd)
+        hWnd = FindWindow(0, BUNDLE_NAME);
+      if (hWnd)
+        SetForegroundWindow(hWnd);
       return 0;
     }
 #endif
@@ -546,7 +549,7 @@ int main(int argc, char** argv)
   // Let SWELL forward events to GTK dialogs while retaining its own GDK event handler.
   SWELL_ExtendedAPI("LOAD_GTK", nullptr);
   SWELL_Internal_PostMessage_Init();
-  SWELL_ExtendedAPI("APPNAME", (void*) BUNDLE_NAME);
+  SWELL_ExtendedAPI("APPNAME", (void*) APP_WINDOW_NAME);
 
   // Parse command line arguments
   for (int i = 1; i < argc; i++)
