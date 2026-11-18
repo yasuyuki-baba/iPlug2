@@ -33,6 +33,10 @@ using namespace iplug;
 #define MAX_PATH_LEN 2048
 #endif
 
+#ifndef APP_VIRTUAL_MIDI_PORT_NAME
+#define APP_VIRTUAL_MIDI_PORT_NAME BUNDLE_NAME
+#endif
+
 #define STRBUFSZ 100
 
 std::unique_ptr<IPlugAPPHost> IPlugAPPHost::sInstance;
@@ -639,7 +643,7 @@ bool IPlugAPPHost::SelectMIDIDevice(ERoute direction, const char* pPortName)
       else if (port == 1)
       {
         std::string virtualMidiInputName = "To ";
-        virtualMidiInputName += BUNDLE_NAME;
+        virtualMidiInputName += APP_VIRTUAL_MIDI_PORT_NAME;
         mMidiIn->openVirtualPort(virtualMidiInputName);
         return true;
       }
@@ -683,7 +687,7 @@ bool IPlugAPPHost::SelectMIDIDevice(ERoute direction, const char* pPortName)
       else if (port == 1)
       {
         std::string virtualMidiOutputName = "From ";
-        virtualMidiOutputName += BUNDLE_NAME;
+        virtualMidiOutputName += APP_VIRTUAL_MIDI_PORT_NAME;
         mMidiOut->openVirtualPort(virtualMidiOutputName);
         return true;
       }
