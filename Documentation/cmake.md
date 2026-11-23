@@ -696,9 +696,9 @@ emrun --no_emrun_detect index.html
 - VST3 editors need the host to provide a Linux `IRunLoop`; CLAP editors use the host's timer and
   POSIX fd extensions when available, and fall back to `on_main_thread` callbacks
 - The default Linux editor runs through X11 (XWayland in a Wayland session).
-  The experimental Wayland options support Skia/CPU and NanoVG/GL3.
-  NanoVG uses EGL on Wayland and retains GLX on X11. Standalone selects
-  Wayland with `--wayland`, VST3 can embed in a host that provides
+  The experimental Wayland options support Skia/CPU, Skia/GL3 and
+  NanoVG/GL3. Both GL3 renderers use EGL on Wayland and GLX on X11.
+  Standalone selects Wayland with `--wayland`, VST3 can embed in a host that provides
   a VST3 Wayland connection, and CLAP can open a floating editor.
   See [the Wayland build and test instructions](../Tests/Wayland/README.md).
 - NanoVG/GL3 remains the default. For Skia/GL3 or Skia/CPU, run

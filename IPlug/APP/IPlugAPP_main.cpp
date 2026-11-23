@@ -634,7 +634,7 @@ int main(int argc, char** argv)
 #if defined IPLUG_EXPERIMENTAL_WAYLAND && ((defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU) || defined IPLUG_WAYLAND_EGL) && !defined NO_IGRAPHICS
     return RunWaylandStandalone();
 #else
-    fprintf(stderr, "--wayland requires IPLUG_EXPERIMENTAL_WAYLAND and Skia/CPU or NanoVG/GL3\n");
+    fprintf(stderr, "--wayland requires IPLUG_EXPERIMENTAL_WAYLAND and Skia/CPU, Skia/GL3 or NanoVG/GL3\n");
 #endif
     return EXIT_FAILURE;
   }

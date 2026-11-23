@@ -97,6 +97,7 @@ struct IGraphicsLinux::WaylandClientSurface
   wl_egl_window* mEGLWindow = nullptr;
   int mEGLWidth = 0;
   int mEGLHeight = 0;
+  bool mEGLWindowResized = false;
   struct ContextState
   {
     EGLenum api;
@@ -159,7 +160,10 @@ struct IGraphicsLinux::WaylandClientSurface
     if (width == mEGLWidth && height == mEGLHeight)
       return true;
     if (mEGLWindow)
+    {
       wl_egl_window_resize(mEGLWindow, width, height, 0, 0);
+      mEGLWindowResized = true;
+    }
     else
     {
       if (width <= 0 || height <= 0 || width > 8192 || height > 8192)
@@ -500,7 +504,10 @@ void* IGraphicsLinux::OpenWaylandClientWindow()
     mWaylandClient->mViewInitialized = true;
 #ifdef IPLUG_WAYLAND_EGL
     if (!GetDrawContext())
+    {
+      fprintf(stderr, "Could not initialize the Wayland OpenGL renderer\n");
       return nullptr;
+    }
 #endif
     GetDelegate()->LayoutUI(this);
 #ifdef IPLUG_WAYLAND_EGL
@@ -648,7 +655,7 @@ void IGraphicsLinux::DrawWaylandClientWindow()
     return;
   }
   ScopedGLContext context{this};
-  if (eglGetCurrentContext() != window.mEGLContext)
+  if (eglGetCurrentContext() != window.mEGLContext || !GetDrawContext())
   {
     RequestWindowClose();
     return;
@@ -665,6 +672,7 @@ void IGraphicsLinux::DrawWaylandClientWindow()
 #ifdef IPLUG_WAYLAND_EGL
   const bool presented = window.mEGLWindow ? eglSwapBuffers(window.mEGLDisplay, window.mEGLSurface)
     : window.PresentShmFrame(window.mEGLWidth, window.mEGLHeight, [&window](void* pData, int stride) {
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
       glReadPixels(0, 0, window.mEGLWidth, window.mEGLHeight, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, pData);
       auto* pPixels = static_cast<unsigned char*>(pData);
       for (int y = 0; y < window.mEGLHeight / 2; ++y)
@@ -675,7 +683,18 @@ void IGraphicsLinux::DrawWaylandClientWindow()
       return true;
     });
   if (presented)
+  {
     window.mPresented = true;
+    if (window.mEGLWindowResized)
+    {
+      // EGL may already have acquired a buffer at the previous size. Repaint
+      // once after presenting it so the newly sized buffer gets drawn.
+      int width = 0, height = 0;
+      wl_egl_window_get_attached_size(window.mEGLWindow, &width, &height);
+      mNeedsRedraw |= width != window.mEGLWidth || height != window.mEGLHeight;
+      window.mEGLWindowResized = false;
+    }
+  }
   else
   {
     fprintf(stderr, "Could not present a Wayland EGL frame\n");

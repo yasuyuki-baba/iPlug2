@@ -90,11 +90,14 @@ The prototype has been checked at scale 1. Decorations depend on the
 compositor, and transient parenting is unavailable. DAW compatibility,
 HiDPI, dialogs and text input remain open.
 
-## NanoVG/GL3 with EGL
+## NanoVG/GL3 and Skia/GL3 with EGL
 
 Install the EGL 1.5 and Wayland EGL development packages (on Ubuntu,
 `libegl-dev` and `libwayland-dev`), Wayland protocols and `wayland-scanner`.
 Use the CLAP and VST3 SDKs above when building those formats.
+For Skia/GL3, use `-DIGRAPHICS_BACKEND=SKIA` with `-DIGRAPHICS_RENDERER=GL3`
+and build the pinned Skia libraries as described in the Linux build
+documentation.
 
 ```sh
 cmake -S Examples/IPlugEffect -B build/wayland-egl -G Ninja \

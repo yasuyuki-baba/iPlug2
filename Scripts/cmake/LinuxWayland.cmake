@@ -9,7 +9,7 @@
 include_guard(GLOBAL)
 
 function(iplug_configure_wayland_client target toplevel)
-  if(NOT IGRAPHICS_LIB MATCHES "^iPlug2::IGraphics::(Skia::CPU|NanoVG::GL3)$")
+  if(NOT IGRAPHICS_LIB MATCHES "^iPlug2::IGraphics::(Skia::CPU|Skia::GL3|NanoVG::GL3)$")
     return()
   endif()
 
@@ -18,7 +18,7 @@ function(iplug_configure_wayland_client target toplevel)
   target_sources(${target} PRIVATE "${IPLUG2_DIR}/IGraphics/Platforms/IGraphicsLinuxWaylandClient.cpp")
   target_compile_definitions(${target} PRIVATE IPLUG_WAYLAND_CLIENT)
   target_link_libraries(${target} PRIVATE PkgConfig::IPLUG_WAYLAND)
-  if(IGRAPHICS_LIB STREQUAL "iPlug2::IGraphics::NanoVG::GL3")
+  if(IGRAPHICS_LIB MATCHES "::GL3$")
     pkg_check_modules(IPLUG_WAYLAND_EGL REQUIRED IMPORTED_TARGET egl>=1.5 wayland-egl)
     target_compile_definitions(${target} PRIVATE IPLUG_WAYLAND_EGL)
     target_link_libraries(${target} PRIVATE PkgConfig::IPLUG_WAYLAND_EGL)
