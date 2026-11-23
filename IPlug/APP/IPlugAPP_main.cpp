@@ -560,9 +560,11 @@ static int RunWaylandStandalone()
 
   SWELL_Internal_PostMessage_Init();
   auto* pHost = IPlugAPPHost::Create();
-  pHost->SetNoIO(true);
+  pHost->SetNoIO(gNoIO);
   if (!pHost->Init() || !pHost->GetPlug()->PrepareGraphics())
     return EXIT_FAILURE;
+  if (!pHost->TryToChangeAudio(false))
+    fprintf(stderr, "Audio startup failed; check the standalone audio settings\n");
 
   auto* pPlug = pHost->GetPlug();
   auto* pGraphics = static_cast<igraphics::IGraphicsLinux*>(pPlug->GetUI());
@@ -581,7 +583,6 @@ static int RunWaylandStandalone()
     SWELL_RunMessageLoop();
     Sleep(5);
   }
-  pHost->CloseWindow();
 #else
   GtkWidget* pWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
   gtk_window_set_title(GTK_WINDOW(pWindow), BUNDLE_NAME);
@@ -606,7 +607,10 @@ static int RunWaylandStandalone()
     SWELL_RunMessageLoop(); // Dispatch the existing standalone plug-in idle timer.
     Sleep(5);
   }
+#endif
+  pHost->CloseAudio();
   pHost->CloseWindow();
+#ifndef IPLUG_WAYLAND_EGL
   gtk_widget_destroy(pWindow);
 #endif
   return EXIT_SUCCESS;
@@ -628,9 +632,7 @@ int main(int argc, char** argv)
   if (wayland)
   {
 #if defined IPLUG_EXPERIMENTAL_WAYLAND && ((defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU) || defined IPLUG_WAYLAND_EGL) && !defined NO_IGRAPHICS
-    if (gNoIO)
-      return RunWaylandStandalone();
-    fprintf(stderr, "The experimental Wayland window requires --no-io\n");
+    return RunWaylandStandalone();
 #else
     fprintf(stderr, "--wayland requires IPLUG_EXPERIMENTAL_WAYLAND and Skia/CPU or NanoVG/GL3\n");
 #endif

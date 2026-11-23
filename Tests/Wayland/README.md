@@ -13,10 +13,11 @@ cmake -S Examples/IPlugEffect -B build/wayland -G Ninja \
 cmake --build build/wayland --target IPlugEffect-app
 ```
 
-In a Wayland desktop session, run `build/wayland/out/IPlugEffect --wayland --no-io`.
-The experimental window supports pointer interaction and resizing. Audio and
-MIDI, menus and preferences, keyboard/IME, clipboard and drag-and-drop are
-outside the scope of this window implementation.
+In a Wayland desktop session, run `build/wayland/out/IPlugEffect --wayland`.
+The standalone app uses audio and MIDI devices from its existing settings.
+Add `--no-io` to run without devices. The experimental window supports pointer
+interaction and resizing. Menus and preferences, keyboard/IME, clipboard and
+drag-and-drop are outside the scope of this window implementation.
 
 With Weston, a C compiler and the GTK 3 development package installed, run:
 

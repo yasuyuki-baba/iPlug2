@@ -240,7 +240,7 @@ public:
   bool MIDISettingsInStateAreEqual(AppState& os, AppState& ns);
 
   bool TryToChangeAudioDriverType();
-  bool TryToChangeAudio();
+  bool TryToChangeAudio(bool showDeviceErrorDialog = true);
   bool SelectMIDIDevice(ERoute direction, const char* portName);
   
   static int AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_t nFrames, double streamTime, RtAudioStreamStatus status, void* pUserData);
