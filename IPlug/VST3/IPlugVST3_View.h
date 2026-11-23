@@ -21,6 +21,11 @@
 #include "IGraphicsLinux.h"
 #endif
 
+#if defined OS_LINUX && defined IPLUG_VST3_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+#include "pluginterfaces/gui/iwaylandframe.h"
+#include "pluginterfaces/vst/ivsthostapplication.h"
+#endif
+
 /** IPlug VST3 View  */
 template <class T>
 class IPlugVST3View : public Steinberg::CPluginView
@@ -64,6 +69,10 @@ public:
 #elif defined OS_LINUX
       if (strcmp(type, Steinberg::kPlatformTypeX11EmbedWindowID) == 0)
         return Steinberg::kResultTrue;
+#if defined IPLUG_VST3_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+      if (strcmp(type, Steinberg::kPlatformTypeWaylandSurfaceID) == 0)
+        return Steinberg::kResultTrue;
+#endif
 #endif
     }
     
@@ -155,6 +164,10 @@ public:
       else // Carbon
         return Steinberg::kResultFalse;
 #elif defined OS_LINUX
+#if defined IPLUG_VST3_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+      if (strcmp(type, Steinberg::kPlatformTypeWaylandSurfaceID) == 0)
+        return AttachWayland(pParent) ? Steinberg::kResultTrue : Steinberg::kResultFalse;
+#endif
       if (strcmp(type, Steinberg::kPlatformTypeX11EmbedWindowID) == 0)
       {
 #ifndef NO_IGRAPHICS
@@ -192,6 +205,9 @@ public:
     if (mOwner.HasUI())
       mOwner.CloseWindow();
     
+#if defined OS_LINUX && defined IPLUG_VST3_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+    mWaylandAttached = false;
+#endif
     return CPluginView::removed();
   }
 
@@ -281,12 +297,23 @@ public:
   Steinberg::tresult PLUGIN_API setFrame(Steinberg::IPlugFrame* pFrame) override
   {
     StopLinuxRunLoop();
+#if defined IPLUG_VST3_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+    if (mWaylandAttached && pFrame != plugFrame)
+    {
+      mLinuxAttached = false;
+      mOwner.CloseWindow();
+      mWaylandAttached = false;
+    }
+#endif
     CPluginView::setFrame(pFrame);
     if (mLinuxAttached && (!FindLinuxRunLoop() || !StartLinuxRunLoop()))
     {
       StopLinuxRunLoop();
       mOwner.CloseWindow();
       mLinuxAttached = false;
+#if defined IPLUG_VST3_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+      mWaylandAttached = false;
+#endif
       return Steinberg::kResultFalse;
     }
     return Steinberg::kResultTrue;
@@ -470,8 +497,70 @@ private:
       StopLinuxRunLoop();
       mLinuxAttached = false;
       mOwner.CloseWindow();
+#if defined IPLUG_VST3_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+      mWaylandAttached = false;
+#endif
     }
   }
+
+#if defined IPLUG_VST3_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  bool AttachWayland(void* pParent)
+  {
+    if (mLinuxAttached || mWaylandAttached || !FindLinuxRunLoop())
+      return false;
+
+    auto fail = [this](const char* reason) {
+      fprintf(stderr, "VST3 Wayland editor: %s\n", reason);
+      StopLinuxRunLoop();
+      mOwner.CloseWindow();
+      mWaylandAttached = false;
+      return false;
+    };
+    Steinberg::TUID iid;
+    memcpy(iid, INLINE_UID_OF(Steinberg::IWaylandHost), sizeof(iid));
+    void* pHost = nullptr;
+    // The SDK editorhost also exposes IWaylandHost on the plug frame.
+    if (!plugFrame || plugFrame->queryInterface(iid, &pHost) != Steinberg::kResultOk || !pHost)
+    {
+      Steinberg::FUnknownPtr<Steinberg::Vst::IHostApplication> app(mOwner.getHostContext());
+      if (!app || app->createInstance(iid, iid, &pHost) != Steinberg::kResultOk || !pHost)
+        return fail("host did not provide IWaylandHost");
+    }
+
+    const auto host = Steinberg::owned(static_cast<Steinberg::IWaylandHost*>(pHost));
+    auto* pDisplay = host->openWaylandConnection();
+    if (!pDisplay)
+      return fail("could not open a host connection");
+
+    auto* pSurface = static_cast<wl_surface*>(pParent);
+    void* pFrame = nullptr;
+    if (plugFrame && plugFrame->queryInterface(INLINE_UID_OF(Steinberg::IWaylandFrame), &pFrame) == Steinberg::kResultOk && pFrame)
+    {
+      auto frame = Steinberg::owned(static_cast<Steinberg::IWaylandFrame*>(pFrame));
+      // The SDK editor host supplies its proxy on our connection through this interface.
+      pSurface = frame->getWaylandSurface(pDisplay);
+    }
+    if (!pSurface || !mOwner.PrepareGraphics())
+    {
+      host->closeWaylandConnection(pDisplay);
+      return fail("could not obtain the host parent or prepare graphics");
+    }
+
+    auto* pGraphics = static_cast<iplug::igraphics::IGraphicsLinux*>(mOwner.GetUI());
+    pGraphics->SetWaylandClientParent(pDisplay, pSurface, [host](wl_display* pConnection) {
+      host->closeWaylandConnection(pConnection);
+    });
+    mWaylandAttached = true;
+    if (!mOwner.OpenWindow(nullptr) || !mWaylandAttached ||
+        pGraphics->WindowCloseRequested() || !StartLinuxRunLoop())
+      return fail("could not open or start the editor");
+
+    mLinuxAttached = true;
+    return true;
+  }
+
+  bool mWaylandAttached = false;
+#endif
 
   bool FindLinuxRunLoop()
   {

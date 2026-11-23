@@ -85,7 +85,10 @@ uint32_t IPlugCLAP::tailGet() const noexcept
 void IPlugCLAP::FlushParamsIfNeeded()
 {
   if (!isProcessing())
-    runOnMainThread([&](){ if (!isBeingDestroyed()) GetClapHost().paramsRequestFlush(); });
+    runOnMainThread([this]() {
+      if (!isBeingDestroyed() && GetClapHost().canUseParams())
+        GetClapHost().paramsRequestFlush();
+    });
 }
 
 void IPlugCLAP::BeginInformHostOfParamChange(int idx)
@@ -114,7 +117,11 @@ bool IPlugCLAP::EditorResize(int viewWidth, int viewHeight)
 {
   if (HasUI())
   {
-    if ((viewWidth != GetEditorWidth() || viewHeight != GetEditorHeight()) && GetClapHost().canUseGui())
+    if ((viewWidth != GetEditorWidth() || viewHeight != GetEditorHeight()) && GetClapHost().canUseGui()
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+        && !mWaylandGui
+#endif
+       )
     {
       GetClapHost().guiRequestResize(viewWidth, viewHeight);
     }
@@ -908,19 +915,56 @@ bool IPlugCLAP::notePortsInfo(uint32_t index, bool isInput, clap_note_port_info*
 // clap_plugin_gui
 bool IPlugCLAP::guiIsApiSupported(const char* api, bool isFloating) noexcept
 {
+  if (!api)
+    return false;
 #if defined OS_MAC
   return !isFloating && !strcmp(api, CLAP_WINDOW_API_COCOA);
 #elif defined OS_WIN
   return !isFloating && !strcmp(api, CLAP_WINDOW_API_WIN32);
 #elif defined OS_LINUX
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (isFloating)
+    return !strcmp(api, CLAP_WINDOW_API_WAYLAND);
+#endif
   return !isFloating && !strcmp(api, CLAP_WINDOW_API_X11);
 #else
   return false;
 #endif
 }
 
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+bool IPlugCLAP::guiGetPreferredApi(const char** api, bool* isFloating) noexcept
+{
+  const char* display = getenv("WAYLAND_DISPLAY");
+  if (!api || !isFloating || !display || !*display || !HasUI())
+    return false;
+
+  *api = CLAP_WINDOW_API_WAYLAND;
+  *isFloating = true;
+  return true;
+}
+
+void IPlugCLAP::guiSuggestTitle(const char* title) noexcept
+{
+  if (!mWaylandGui)
+    return;
+
+  if (!title || !*title)
+    title = GetPluginName();
+  mWaylandGuiTitle.Set(title);
+  if (auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI()))
+    pGraphics->SetWaylandClientTitle(title);
+}
+#endif
+
 bool IPlugCLAP::guiSetParent(const clap_window* pWindow) noexcept
 {
+  if (!pWindow)
+    return false;
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandGui)
+    return false;
+#endif
 #if defined OS_MAC
   return GUIWindowAttach(pWindow->cocoa);
 #elif defined OS_WIN
@@ -940,7 +984,22 @@ bool IPlugCLAP::implementsGui() const noexcept
 bool IPlugCLAP::guiCreate(const char* api, bool isFloating) noexcept
 {
 #if defined OS_LINUX && !defined NO_IGRAPHICS
-  return HasUI() && guiIsApiSupported(api, isFloating) && PrepareGraphics();
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if ((!api || !*api) && isFloating)
+    api = CLAP_WINDOW_API_WAYLAND;
+  if (mGUIOpen || mWaylandGui)
+    return false;
+#endif
+  if (!HasUI() || !guiIsApiSupported(api, isFloating) || !PrepareGraphics())
+    return false;
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (isFloating)
+  {
+    mWaylandGui = true;
+    mWaylandGuiTitle.Set(GetPluginName());
+  }
+#endif
+  return true;
 #else
   return HasUI();
 #endif
@@ -958,10 +1017,31 @@ void IPlugCLAP::guiDestroy() noexcept
   CloseWindow();
   mGUIOpen = false;
   mWindow = nullptr;
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  mWaylandGui = false;
+  mWaylandGuiClosed = false;
+#endif
 }
 
 bool IPlugCLAP::guiShow() noexcept
 {
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandGui)
+  {
+    if (mGUIOpen)
+      return true;
+    if (mWaylandGuiClosed || !PrepareGraphics())
+      return false;
+
+    auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI());
+    if (!pGraphics->ConnectWaylandClient(mWaylandGuiTitle.Get()) || !GUIWindowAttach(nullptr))
+    {
+      CloseWindow();
+      return false;
+    }
+    return true;
+  }
+#endif
 #if defined OS_LINUX && (defined WEBVIEW_EDITOR_DELEGATE || !defined NO_IGRAPHICS)
   return HasUI() && (mGUIOpen || (mWindow && GUIWindowAttach(mWindow)));
 #else
@@ -1009,11 +1089,19 @@ bool IPlugCLAP::guiHide() noexcept
 
 bool IPlugCLAP::guiCanResize() const noexcept
 {
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandGui)
+    return false; // The compositor manages the floating window.
+#endif
   return HasUI() && GetHostResizeEnabled();
 }
 
 bool IPlugCLAP::guiSetScale(double scale) noexcept
 {
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandGui)
+    return false;
+#endif
 #if defined OS_LINUX && !defined NO_IGRAPHICS
   return HasUI() && SetHostScreenScale(static_cast<float>(scale));
 #else
@@ -1150,6 +1238,10 @@ bool IPlugCLAP::guiAdjustSize(uint32_t* pWidth, uint32_t* pHeight) noexcept
 
 bool IPlugCLAP::guiSetSize(uint32_t width, uint32_t height) noexcept
 {
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandGui)
+    return false;
+#endif
   Trace(TRACELOC, "width:%i height:%i\n", width, height);
 
   if (HasUI())
@@ -1306,6 +1398,14 @@ void IPlugCLAP::CheckLinuxGuiClosed() noexcept
     UnregisterLinuxHostCallbacks();
     mGUIOpen = false;
     CloseWindowIfRequested();
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+    if (mWaylandGui && !mWaylandGuiClosed)
+    {
+      mWaylandGuiClosed = true;
+      if (_host.canUseGui())
+        _host.guiClosed(true);
+    }
+#endif
   }
 }
 

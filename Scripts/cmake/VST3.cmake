@@ -9,6 +9,7 @@
 # VST3 target configuration for iPlug2
 
 include(${CMAKE_CURRENT_LIST_DIR}/IPlug.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/LinuxWayland.cmake)
 
 if(NOT TARGET iPlug2::VST3)
   # Define SDK path
@@ -198,6 +199,15 @@ function(iplug_configure_vst3 target project_name)
       )
     endif()
   elseif(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
+    option(IPLUG_VST3_WAYLAND "Enable experimental native Wayland embedding for VST3" OFF)
+    if(IPLUG_VST3_WAYLAND)
+      if(NOT EXISTS "${IPLUG2_DIR}/Dependencies/IPlug/VST3_SDK/pluginterfaces/gui/iwaylandframe.h")
+        message(FATAL_ERROR "VST3 Wayland requires the VST3 SDK Wayland interfaces")
+      endif()
+      iplug_configure_wayland_client(${target} FALSE)
+      target_compile_definitions(${target} PRIVATE IPLUG_VST3_WAYLAND)
+    endif()
+
     # VST3 on Linux uses a bundle-like directory structure
     # The subdirectory name is "{cpu_arch}-linux" per the VST3 spec
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")

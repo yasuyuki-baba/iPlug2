@@ -695,7 +695,12 @@ emrun --no_emrun_detect index.html
   `IPLUG2_SCREEN_SCALE` (e.g. `1.5`) to override the monitor scale factor
 - VST3 editors need the host to provide a Linux `IRunLoop`; CLAP editors use the host's timer and
   POSIX fd extensions when available, and fall back to `on_main_thread` callbacks
-- Native Wayland is not supported; editors run through XWayland
+- The default Linux editor runs through X11 (XWayland in a Wayland session).
+  The experimental Wayland options support Skia/CPU and NanoVG/GL3.
+  NanoVG uses EGL on Wayland and retains GLX on X11. Standalone selects
+  Wayland with `--wayland --no-io`, VST3 can embed in a host that provides
+  a VST3 Wayland connection, and CLAP can open a floating editor.
+  See [the Wayland build and test instructions](../Tests/Wayland/README.md).
 - NanoVG/GL3 remains the default. For Skia/GL3 or Skia/CPU, run
   `Dependencies/IGraphics/build-skia-linux.sh` to build the pinned Skia
   `chrome/m130` revision. This installs headers and matching static libraries

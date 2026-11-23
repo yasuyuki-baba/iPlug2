@@ -825,10 +825,44 @@ IGraphicsLinux::IGraphicsLinux(IGEditorDelegate& dlg, int w, int h, int fps, flo
 
 IGraphicsLinux::~IGraphicsLinux() { CloseWindow(); }
 
+void* IGraphicsLinux::GetWindow()
+{
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  if (mWaylandArea)
+    return mWaylandArea;
+#endif
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandClient)
+    return GetWaylandClientWindow();
+#endif
+  return (void*)(uintptr_t)mPlugWnd;
+}
+
+const char* IGraphicsLinux::GetPlatformAPIStr()
+{
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  if (mWaylandWindow)
+    return "wayland";
+#endif
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandClientDisplay)
+    return "wayland";
+#endif
+  return "x11";
+}
+
 void* IGraphicsLinux::OpenWindow(void* pParent)
 {
   StopTimer();
   mCloseRequested = false;
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  if (mWaylandWindow)
+    return OpenWaylandWindow();
+#endif
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandClientDisplay)
+    return OpenWaylandClientWindow();
+#endif
   mDisplay = XOpenDisplay(nullptr);
   if (!mDisplay)
     return nullptr;
@@ -1052,6 +1086,20 @@ void IGraphicsLinux::CloseWindow()
     RequestWindowClose();
     return;
   }
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  if (mWaylandArea)
+  {
+    CloseWaylandWindow();
+    return;
+  }
+#endif
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandClientDisplay)
+  {
+    CloseWaylandClientWindow();
+    return;
+  }
+#endif
   StopTimer();
   ResetDrag();
   HideTooltip();
@@ -1204,6 +1252,15 @@ void IGraphicsLinux::PlatformResize(bool parentHasResized)
   if (mInConfigureNotify)
     return;
 
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  if (mWaylandArea)
+  {
+    if (parentHasResized)
+      ResizeWaylandWindow();
+    return;
+  }
+#endif
+
   if (mDisplay && mPlugWnd)
   {
     // X11 window must be in physical pixels (WindowWidth/Height are logical).
@@ -1243,6 +1300,21 @@ void IGraphicsLinux::DestroyCPUImage()
 
 void IGraphicsLinux::PresentCPUFrame(const SkPixmap& pixels)
 {
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandClient)
+  {
+    PresentWaylandClientFrame(pixels);
+    return;
+  }
+#endif
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  if (mWaylandArea)
+  {
+    if (mWaylandPaint)
+      PaintWaylandFrame(pixels);
+    return;
+  }
+#endif
   if (!mDisplay || !mPlugWnd || pixels.width() <= 0 || pixels.height() <= 0)
     return;
 
@@ -1514,6 +1586,22 @@ ECursor IGraphicsLinux::SetMouseCursor(ECursor cursorType)
 
 void IGraphicsLinux::GetMouseLocation(float& x, float& y) const
 {
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandClient)
+  {
+    x = mCursorX;
+    y = mCursorY;
+    return;
+  }
+#endif
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  if (mWaylandArea)
+  {
+    x = mCursorX;
+    y = mCursorY;
+    return;
+  }
+#endif
   if (!mDisplay || !mPlugWnd)
   {
     x = y = 0.f;
@@ -2146,6 +2234,13 @@ void IGraphicsLinux::CachePlatformFont(const char* fontID, const PlatformFontPtr
 void IGraphicsLinux::ActivateGLContext()
 {
 #ifdef IGRAPHICS_GL
+#if defined IPLUG_WAYLAND_EGL && !defined NO_IGRAPHICS
+  if (mWaylandClient)
+  {
+    ActivateWaylandClientGL();
+    return;
+  }
+#endif
   mGLContextStack.push_back({glXGetCurrentDisplay(), glXGetCurrentContext(), glXGetCurrentDrawable(), glXGetCurrentReadDrawable()});
   if (!mDisplay || !mGLContext)
     return;
@@ -2157,6 +2252,13 @@ void IGraphicsLinux::ActivateGLContext()
 void IGraphicsLinux::DeactivateGLContext()
 {
 #ifdef IGRAPHICS_GL
+#if defined IPLUG_WAYLAND_EGL && !defined NO_IGRAPHICS
+  if (mWaylandClient)
+  {
+    DeactivateWaylandClientGL();
+    return;
+  }
+#endif
   assert(!mGLContextStack.empty());
   const auto state = mGLContextStack.back();
   mGLContextStack.pop_back();
@@ -2836,6 +2938,14 @@ void IGraphicsLinux::OnDisplayTimer()
   if (IsInPlatformCallback())
     return;
   DispatchScope dispatch(mDispatchDepth);
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandClient)
+  {
+    if (!mCloseRequested)
+      DrawWaylandClientWindow();
+    return;
+  }
+#endif
   if (!mDisplay || !mPlugWnd || mCloseRequested)
     return;
 

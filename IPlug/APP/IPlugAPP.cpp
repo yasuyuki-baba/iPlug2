@@ -15,6 +15,9 @@
 
 #ifdef OS_LINUX
 #include "IPlugSWELLTimer.h"
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && ((defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU) || defined IPLUG_WAYLAND_EGL) && !defined NO_IGRAPHICS
+#include "IGraphicsLinux.h"
+#endif
 #if defined WEBVIEW_EDITOR_DELEGATE
 extern "C" void IPlugLinuxWebViewPump();
 #endif
@@ -60,6 +63,15 @@ IPlugAPP::IPlugAPP(const InstanceInfo& info, const Config& config)
 
 bool IPlugAPP::EditorResize(int viewWidth, int viewHeight)
 {
+#if defined OS_LINUX && defined IPLUG_EXPERIMENTAL_WAYLAND && ((defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU) || defined IPLUG_WAYLAND_EGL) && !defined NO_IGRAPHICS
+  if (auto* pGraphics = static_cast<igraphics::IGraphicsLinux*>(GetUI());
+      pGraphics && strcmp(pGraphics->GetPlatformAPIStr(), "wayland") == 0)
+  {
+    const bool changed = viewWidth != GetEditorWidth() || viewHeight != GetEditorHeight();
+    SetEditorSize(viewWidth, viewHeight);
+    return changed;
+  }
+#endif
   bool parentResized = false;
   
   if (viewWidth != GetEditorWidth() || viewHeight != GetEditorHeight())
