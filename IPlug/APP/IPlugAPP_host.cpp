@@ -266,7 +266,7 @@ bool IPlugAPPHost::InitState()
     }
 
     // if settings file doesn't exist, populate with default values, otherwise overwrite
-    UpdateINI();
+    return UpdateINI();
   }
   else // folder doesn't exist - make folder and make file
   {
@@ -274,7 +274,7 @@ bool IPlugAPPHost::InitState()
     // folder doesn't exist - make folder and make file
     CreateDirectory(mINIPath.Get(), NULL);
     mINIPath.Append("settings.ini");
-    UpdateINI(); // will write file if doesn't exist
+    return UpdateINI(); // will write file if doesn't exist
 #elif defined OS_MAC
     mode_t process_mask = umask(0);
     int result_code = mkdir(mINIPath.Get(), S_IRWXU | S_IRWXG | S_IRWXO);
@@ -283,7 +283,7 @@ bool IPlugAPPHost::InitState()
     if (!result_code)
     {
       mINIPath.Append("settings.ini");
-      UpdateINI(); // will write file if doesn't exist
+      return UpdateINI(); // will write file if doesn't exist
     }
     else
     {
@@ -297,42 +297,59 @@ bool IPlugAPPHost::InitState()
   return true;
 }
 
-void IPlugAPPHost::UpdateINI()
+bool IPlugAPPHost::UpdateINI()
 {
   char buf[STRBUFSZ]; // temp buffer for writing integers to profile strings
   const char* ini = mINIPath.Get();
+  bool success = true;
+  auto write = [&](const char* section, const char* key, const char* value) {
+    if (!success)
+      return;
+    if (!WritePrivateProfileString(section, key, value, ini))
+    {
+#ifdef OS_LINUX
+      const int error = errno;
+      fprintf(stderr, "Cannot save settings '%s' [%s] %s: %s\n",
+              ini, section, key, strerror(error ? error : EIO));
+#else
+      fprintf(stderr, "Cannot save settings '%s' [%s] %s\n", ini, section, key);
+#endif
+      success = false;
+    }
+  };
 
   sprintf(buf, "%u", mState.mAudioDriverType);
-  WritePrivateProfileString("audio", "driver", buf, ini);
+  write("audio", "driver", buf);
 
-  WritePrivateProfileString("audio", "indev", mState.mAudioInDev.Get(), ini);
-  WritePrivateProfileString("audio", "outdev", mState.mAudioOutDev.Get(), ini);
+  write("audio", "indev", mState.mAudioInDev.Get());
+  write("audio", "outdev", mState.mAudioOutDev.Get());
 
   sprintf(buf, "%u", mState.mAudioInChanL);
-  WritePrivateProfileString("audio", "in1", buf, ini);
+  write("audio", "in1", buf);
   sprintf(buf, "%u", mState.mAudioInChanR);
-  WritePrivateProfileString("audio", "in2", buf, ini);
+  write("audio", "in2", buf);
   sprintf(buf, "%u", mState.mAudioOutChanL);
-  WritePrivateProfileString("audio", "out1", buf, ini);
+  write("audio", "out1", buf);
   sprintf(buf, "%u", mState.mAudioOutChanR);
-  WritePrivateProfileString("audio", "out2", buf, ini);
+  write("audio", "out2", buf);
   //sprintf(buf, "%u", mState.mAudioInIsMono);
   //WritePrivateProfileString("audio", "monoinput", buf, ini);
 
   WDL_String str;
   str.SetFormatted(32, "%i", mState.mBufferSize);
-  WritePrivateProfileString("audio", "buffer", str.Get(), ini);
+  write("audio", "buffer", str.Get());
 
   str.SetFormatted(32, "%i", mState.mAudioSR);
-  WritePrivateProfileString("audio", "sr", str.Get(), ini);
+  write("audio", "sr", str.Get());
 
-  WritePrivateProfileString("midi", "indev", mState.mMidiInDev.Get(), ini);
-  WritePrivateProfileString("midi", "outdev", mState.mMidiOutDev.Get(), ini);
+  write("midi", "indev", mState.mMidiInDev.Get());
+  write("midi", "outdev", mState.mMidiOutDev.Get());
 
   sprintf(buf, "%u", mState.mMidiInChan);
-  WritePrivateProfileString("midi", "inchan", buf, ini);
+  write("midi", "inchan", buf);
   sprintf(buf, "%u", mState.mMidiOutChan);
-  WritePrivateProfileString("midi", "outchan", buf, ini);
+  write("midi", "outchan", buf);
+  return success;
 }
 
 std::string IPlugAPPHost::GetAudioDeviceName(uint32_t deviceID) const
@@ -540,14 +557,12 @@ bool IPlugAPPHost::TryToChangeAudioDriverType()
   //else
   //mDAC = std::make_unique<RtAudio>(RtAudio::UNIX_JACK);
 #elif defined OS_LINUX
-  if (mState.mAudioDriverType == kDeviceJack)
+  if (mState.mAudioDriverType == kDeviceAlsa)
+    mDAC = std::make_unique<RtAudio>(RtAudio::LINUX_ALSA);
+  else if (mState.mAudioDriverType == kDeviceJack)
     mDAC = std::make_unique<RtAudio>(RtAudio::UNIX_JACK);
   else
-  {
-    // Fall back to ALSA for an unrecognised driver in the settings file
-    mState.mAudioDriverType = kDeviceAlsa;
-    mDAC = std::make_unique<RtAudio>(RtAudio::LINUX_ALSA);
-  }
+    return false; // Reject corrupted settings before constructing or probing a backend.
 #endif
 
   if (mDAC)
