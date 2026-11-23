@@ -700,6 +700,7 @@ emrun --no_emrun_detect index.html
   NanoVG/GL3. Both GL3 renderers use EGL on Wayland and GLX on X11.
   Standalone selects Wayland with `--wayland`, VST3 can embed in a host that provides
   a VST3 Wayland connection, and CLAP can open a floating editor.
+  In the Wayland standalone app, Ctrl+P opens Audio and MIDI Settings.
   See [the Wayland build and test instructions](../Tests/Wayland/README.md).
 - NanoVG/GL3 remains the default. For Skia/GL3 or Skia/CPU, run
   `Dependencies/IGraphics/build-skia-linux.sh` to build the pinned Skia

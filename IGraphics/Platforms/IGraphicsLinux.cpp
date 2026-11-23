@@ -648,6 +648,63 @@ static void GtkDrainEvents(GTK3* pGTK)
       pGTK->main_iteration_do(0 /* non-blocking */);
 }
 
+static void* GtkWaylandScreen(GTK3& gtk)
+{
+  using Type = uintptr_t;
+  auto getType = reinterpret_cast<Type (*)()>(dlsym(gtk.handle, "gdk_wayland_display_get_type"));
+  auto isType = reinterpret_cast<int (*)(void*, Type)>(dlsym(gtk.handle, "g_type_check_instance_is_a"));
+  auto getScreen = reinterpret_cast<void* (*)(void*)>(dlsym(gtk.handle, "gdk_display_get_default_screen"));
+  if (!getType || !isType || !getScreen || !gtk.gdk_display_get_default)
+    return nullptr;
+
+  if (void* display = gtk.gdk_display_get_default(); display && isType(display, getType()))
+    return getScreen(display);
+
+  // A DAW may have initialized GTK on X11 before opening a Wayland editor.
+  // Open the Wayland display separately and leave the host's default alone.
+  static void* waylandDisplay = nullptr;
+  if (!waylandDisplay)
+  {
+    auto open = reinterpret_cast<void* (*)(const char*)>(dlsym(gtk.handle, "gdk_display_open"));
+    const char* name = getenv("WAYLAND_DISPLAY");
+    if (open)
+    {
+      void* display = open(name && *name ? name : "wayland-0");
+      if (display && isType(display, getType()))
+        waylandDisplay = display;
+      else if (display)
+      {
+        if (auto close = reinterpret_cast<void (*)(void*)>(dlsym(gtk.handle, "gdk_display_close")))
+          close(display);
+      }
+    }
+  }
+  return waylandDisplay ? getScreen(waylandDisplay) : nullptr;
+}
+
+bool IGraphicsLinux::PrepareLinuxDialog(void* dialog)
+{
+  if (!dialog)
+    return false;
+  if (strcmp(GetPlatformAPIStr(), "wayland") != 0)
+    return true;
+  auto* gtk = LoadGTK3();
+  auto* screen = GtkWaylandScreen(*gtk);
+  auto setScreen = reinterpret_cast<void (*)(void*, void*)>(dlsym(gtk->handle, "gtk_window_set_screen"));
+  if (!screen || !setScreen)
+  {
+    fprintf(stderr, "Cannot open GTK dialog on Wayland\n");
+    return false;
+  }
+  setScreen(dialog, screen);
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  if (mWaylandWindow)
+    if (auto setParent = reinterpret_cast<void (*)(void*, void*)>(dlsym(gtk->handle, "gtk_window_set_transient_for")))
+      setParent(dialog, mWaylandWindow);
+#endif
+  return true;
+}
+
 // Present a GTK dialog as modal so the WM grants it focus and input grabs.
 // Without this, file-chooser dropdowns and color-picker sub-dialogs fail
 // on compositing WMs (Mutter, KWin) because GTK can't acquire a GDK grab.
@@ -1679,9 +1736,12 @@ EMsgBoxResult IGraphicsLinux::ShowMessageBox(const char* str, const char* title,
   }
   if (title && pGTK->window_set_title)
     pGTK->window_set_title(dialog, title);
-  GtkPresentDialog(pGTK, dialog);
+  DispatchScope dispatch(mDispatchDepth);
+  const bool ready = PrepareLinuxDialog(dialog);
+  if (ready)
+    GtkPresentDialog(pGTK, dialog);
 
-  int resp = pGTK->dialog_run(dialog);
+  int resp = ready ? pGTK->dialog_run(dialog) : kGTK_RESPONSE_CANCEL;
   pGTK->widget_destroy(dialog);
   GtkDrainEvents(pGTK);
 
@@ -1770,9 +1830,12 @@ void IGraphicsLinux::PromptForFile(WDL_String& fileName, WDL_String& path, EFile
   // For save dialogs, suggest filename
   if (isSave && fileName.GetLength() && pGTK->file_chooser_set_current_name)
     pGTK->file_chooser_set_current_name(dialog, fileName.Get());
-  GtkPresentDialog(pGTK, dialog);
+  DispatchScope dispatch(mDispatchDepth);
+  const bool ready = PrepareLinuxDialog(dialog);
+  if (ready)
+    GtkPresentDialog(pGTK, dialog);
 
-  if (pGTK->dialog_run(dialog) == kGTK_RESPONSE_OK)
+  if (ready && pGTK->dialog_run(dialog) == kGTK_RESPONSE_OK)
   {
     char* chosen = pGTK->file_chooser_get_filename(dialog);
     if (chosen)
@@ -1820,9 +1883,12 @@ void IGraphicsLinux::PromptForDirectory(WDL_String& dir, IFileDialogCompletionHa
 
   if (dir.GetLength() && pGTK->file_chooser_set_current_folder)
     pGTK->file_chooser_set_current_folder(dialog, dir.Get());
-  GtkPresentDialog(pGTK, dialog);
+  DispatchScope dispatch(mDispatchDepth);
+  const bool ready = PrepareLinuxDialog(dialog);
+  if (ready)
+    GtkPresentDialog(pGTK, dialog);
 
-  if (pGTK->dialog_run(dialog) == kGTK_RESPONSE_OK)
+  if (ready && pGTK->dialog_run(dialog) == kGTK_RESPONSE_OK)
   {
     char* chosen = pGTK->file_chooser_get_filename(dialog);
     if (chosen)
@@ -1849,15 +1915,20 @@ bool IGraphicsLinux::PromptForColor(IColor& color, const char* str, IColorPicker
     return false;
 
   void* dialog = pGTK->color_chooser_dialog_new(str ? str : "Choose Color", nullptr);
+  if (!dialog)
+    return false;
 
   if (pGTK->color_chooser_set_rgba)
   {
     GdkRGBA rgba = {color.R / 255.0, color.G / 255.0, color.B / 255.0, color.A / 255.0};
     pGTK->color_chooser_set_rgba(dialog, &rgba);
   }
-  GtkPresentDialog(pGTK, dialog);
+  DispatchScope dispatch(mDispatchDepth);
+  const bool ready = PrepareLinuxDialog(dialog);
+  if (ready)
+    GtkPresentDialog(pGTK, dialog);
 
-  const bool accepted = (pGTK->dialog_run(dialog) == kGTK_RESPONSE_OK);
+  const bool accepted = (ready && pGTK->dialog_run(dialog) == kGTK_RESPONSE_OK);
 
   if (accepted && pGTK->color_chooser_get_rgba)
   {
@@ -1880,6 +1951,14 @@ bool IGraphicsLinux::OpenURL(const char* url, const char* msgWindowTitle, const 
 
 bool IGraphicsLinux::GetTextFromClipboard(WDL_String& str)
 {
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  if (mWaylandArea)
+    return ReadGtkWaylandClipboard(str);
+#endif
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandClient)
+    return ReadWaylandClientClipboard(str);
+#endif
   if (!mDisplay || !mPlugWnd || !mClipboardAtom)
     return false;
 
@@ -1942,6 +2021,14 @@ bool IGraphicsLinux::GetTextFromClipboard(WDL_String& str)
 
 bool IGraphicsLinux::SetTextInClipboard(const char* str)
 {
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  if (mWaylandArea)
+    return WriteGtkWaylandClipboard(str);
+#endif
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandClient)
+    return WriteWaylandClientClipboard(str);
+#endif
   if (!mDisplay || !mPlugWnd || !mClipboardAtom)
     return false;
 
@@ -2141,6 +2228,11 @@ void IGraphicsLinux::CreatePlatformTextEntry(int paramIdx, const IText& text, co
 
   void* dialog = pGTK->dialog_new_with_buttons("Edit Value", nullptr, kGTK_DIALOG_MODAL, "_Cancel", kGTK_RESPONSE_CANCEL, "_OK", kGTK_RESPONSE_OK, nullptr);
 
+  if (!dialog)
+  {
+    ClearInTextEntryControl();
+    return;
+  }
   void* entry = pGTK->entry_new();
   if (pGTK->entry_set_text && str)
     pGTK->entry_set_text(entry, str);
@@ -2161,11 +2253,16 @@ void IGraphicsLinux::CreatePlatformTextEntry(int paramIdx, const IText& text, co
   void* contentArea = pGTK->dialog_get_content_area(dialog);
   pGTK->box_pack_start(contentArea, entry, 1, 1, 0);
 
-  if (pGTK->widget_show_all)
-    pGTK->widget_show_all(dialog);
-  GtkPresentDialog(pGTK, dialog);
+  DispatchScope dispatch(mDispatchDepth);
+  const bool ready = PrepareLinuxDialog(dialog);
+  if (ready)
+  {
+    if (pGTK->widget_show_all)
+      pGTK->widget_show_all(dialog);
+    GtkPresentDialog(pGTK, dialog);
+  }
 
-  int response = pGTK->dialog_run(dialog);
+  int response = ready ? pGTK->dialog_run(dialog) : kGTK_RESPONSE_CANCEL;
 
   if (response == kGTK_RESPONSE_OK)
   {
@@ -2504,6 +2601,13 @@ void IGraphicsLinux::DispatchKeyEvent(XKeyEvent& event)
   if (length > 1)
     symbol = 0;
 
+  DispatchLinuxKey(event.type == KeyPress, symbol, text.Get(), length,
+                   (event.state & ShiftMask) != 0, (event.state & ControlMask) != 0, (event.state & Mod1Mask) != 0);
+}
+
+bool IGraphicsLinux::DispatchLinuxKey(bool pressed, KeySym symbol, const char* text, int length, bool shift, bool control, bool alt)
+{
+  bool handled = false;
   int offset = 0;
   do
   {
@@ -2512,24 +2616,39 @@ void IGraphicsLinux::DispatchKeyEvent(XKeyEvent& event)
     if (offset < length)
     {
       int codepoint = 0;
-      size = wdl_utf8_parsechar(text.Get() + offset, &codepoint);
+      size = wdl_utf8_parsechar(text + offset, &codepoint);
       char encoded[4]{};
       if (size > 4 || offset + size > length || codepoint > 0x10FFFF || (codepoint >= 0xD800 && codepoint <= 0xDFFF) || wdl_utf8_makechar(codepoint, encoded, sizeof(encoded)) != size
-          || memcmp(encoded, text.Get() + offset, size) != 0)
+          || memcmp(encoded, text + offset, size) != 0)
       {
         fprintf(stderr, "The Linux input method returned invalid UTF-8\n");
-        return;
+        return handled;
       }
-      memcpy(character, text.Get() + offset, size);
+      memcpy(character, text + offset, size);
     }
     // IKeyPress holds one UTF-8 code point, while an IME can commit an entire phrase.
-    IKeyPress key(character, offset == 0 ? KeysymToVK(symbol) : kVK_NONE, (event.state & ShiftMask) != 0, (event.state & ControlMask) != 0, (event.state & Mod1Mask) != 0);
-    if (event.type == KeyPress)
-      OnKeyDown(mCursorX, mCursorY, key);
-    else
-      OnKeyUp(mCursorX, mCursorY, key);
+    IKeyPress key(character, offset == 0 ? KeysymToVK(symbol) : kVK_NONE, shift, control, alt);
+    handled |= pressed ? OnKeyDown(mCursorX, mCursorY, key) : OnKeyUp(mCursorX, mCursorY, key);
     offset += size;
   } while (offset < length && !mCloseRequested);
+  return handled;
+}
+
+bool IGraphicsLinux::DispatchLinuxDrop(const unsigned char* data, size_t length, float x, float y)
+{
+  const auto paths = ParseDroppedFiles(data, length);
+  if (paths.empty())
+    return false;
+  if (paths.size() == 1)
+    OnDrop(paths[0].c_str(), x, y);
+  else
+  {
+    std::vector<const char*> pointers;
+    for (const auto& path : paths)
+      pointers.push_back(path.c_str());
+    OnDropMultiple(pointers, x, y);
+  }
+  return true;
 }
 
 void IGraphicsLinux::ProcessX11Events()
@@ -2862,22 +2981,7 @@ void IGraphicsLinux::DispatchX11Events()
         unsigned char* data = nullptr;
         if (XGetWindowProperty(mDisplay, mPlugWnd, mDropProperty, 0, 262144, 1, mUriList, &type, &format, &count, &remaining, &data) == 0 && type == mUriList && format == 8 && remaining == 0 && data)
         {
-          const auto paths = ParseDroppedFiles(data, count);
-          XFree(data);
-          data = nullptr;
-          if (!paths.empty())
-          {
-            accepted = true;
-            if (paths.size() == 1)
-              OnDrop(paths[0].c_str(), mDropX, mDropY);
-            else
-            {
-              std::vector<const char*> pointers;
-              for (const auto& path : paths)
-                pointers.push_back(path.c_str());
-              OnDropMultiple(pointers, mDropX, mDropY);
-            }
-          }
+          accepted = DispatchLinuxDrop(data, count, mDropX, mDropY);
         }
         if (data)
           XFree(data);

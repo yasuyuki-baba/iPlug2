@@ -421,6 +421,8 @@ void IPlugAPPHost::ProbeAudioIO()
 {
   mAudioInputDevIDs.clear();
   mAudioOutputDevIDs.clear();
+  mDefaultInputDev.reset();
+  mDefaultOutputDev.reset();
 
   if (!mDAC)
     return;
@@ -492,7 +494,7 @@ void IPlugAPPHost::ProbeMidiIO()
   }
 }
 
-bool IPlugAPPHost::AudioSettingsInStateAreEqual(AppState& os, AppState& ns)
+bool IPlugAPPHost::AudioSettingsInStateAreEqual(const AppState& os, const AppState& ns)
 {
   if (os.mAudioDriverType != ns.mAudioDriverType) return false;
   if (std::string_view(os.mAudioInDev.Get()) != ns.mAudioInDev.Get()) return false;

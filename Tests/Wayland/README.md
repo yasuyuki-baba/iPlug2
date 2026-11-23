@@ -15,9 +15,9 @@ cmake --build build/wayland --target IPlugEffect-app
 
 In a Wayland desktop session, run `build/wayland/out/IPlugEffect --wayland`.
 The standalone app uses audio and MIDI devices from its existing settings.
-Add `--no-io` to run without devices. The experimental window supports pointer
-interaction and resizing. Menus and preferences, keyboard/IME, clipboard and
-drag-and-drop are outside the scope of this window implementation.
+Press Ctrl+P to open Audio and MIDI Settings. Add `--no-io` to run without
+devices. The GTK window supports pointer and keyboard input, IME commits,
+clipboard text and dropping local files.
 
 With Weston, a C compiler and the GTK 3 development package installed, run:
 
@@ -39,7 +39,8 @@ are separate checks.
 ## Experimental VST3 embedding
 
 Build against the VST3 SDK 3.8 Wayland interfaces. Also install the
-`wayland-client` development package (`libwayland-dev` on Ubuntu).
+`wayland-client` and `xkbcommon` development packages
+(`libwayland-dev` and `libxkbcommon-dev` on Ubuntu).
 
 ```sh
 cmake -S Examples/IPlugEffect -B build/wayland-vst3 -G Ninja \
@@ -62,12 +63,13 @@ For a visible test, start the Steinberg SDK's `editorhost` built with
 The SDK example needs a compositor seat. In OrbStack, Weston with an active
 RDP client provides one. This configuration was used to verify initial
 display and dragging a knob with XWayland disabled. The prototype has been
-checked at scale 1. DAW compatibility, other
-scales, dialogs and text input remain open.
+checked at scale 1. DAW compatibility and compositor-specific scaling
+remain open. The VST3 host's Wayland connection determines which seat
+and data-device interfaces the editor can use.
 
 ## Experimental CLAP floating editor
 
-Install the CLAP SDK and helpers, the `wayland-client` development package,
+Install the CLAP SDK and helpers, the `wayland-client` and `xkbcommon` development packages,
 Wayland protocols and `wayland-scanner`. Build and test the Skia/CPU example:
 
 ```sh
@@ -87,13 +89,19 @@ small CLAP host, checks repeated show/hide and destruction, and verifies
 the host's close notification when the Wayland connection is lost.
 
 The prototype has been checked at scale 1. Decorations depend on the
-compositor, and transient parenting is unavailable. DAW compatibility,
-HiDPI, dialogs and text input remain open.
+compositor, and transient parenting is unavailable. DAW compatibility
+and compositor-specific HiDPI remain open.
+
+The native client handles key events and XKB Compose when the compositor
+provides a keyboard. Clipboard text and local file drops use the Wayland
+data-device interface. File, directory, color and text-entry dialogs use
+GTK 3 on Wayland. The GTK text-entry dialog provides the desktop IME;
+the raw surface's key callbacks deliver XKB text and Compose.
 
 ## NanoVG/GL3 and Skia/GL3 with EGL
 
-Install the EGL 1.5 and Wayland EGL development packages (on Ubuntu,
-`libegl-dev` and `libwayland-dev`), Wayland protocols and `wayland-scanner`.
+Install the EGL 1.5, Wayland EGL and `xkbcommon` development packages (on Ubuntu,
+`libegl-dev`, `libwayland-dev` and `libxkbcommon-dev`), Wayland protocols and `wayland-scanner`.
 Use the CLAP and VST3 SDKs above when building those formats.
 For Skia/GL3, use `-DIGRAPHICS_BACKEND=SKIA` with `-DIGRAPHICS_RENDERER=GL3`
 and build the pinned Skia libraries as described in the Linux build

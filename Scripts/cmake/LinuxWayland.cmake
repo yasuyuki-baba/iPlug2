@@ -14,7 +14,7 @@ function(iplug_configure_wayland_client target toplevel)
   endif()
 
   find_package(PkgConfig REQUIRED)
-  pkg_check_modules(IPLUG_WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
+  pkg_check_modules(IPLUG_WAYLAND REQUIRED IMPORTED_TARGET wayland-client xkbcommon)
   target_sources(${target} PRIVATE "${IPLUG2_DIR}/IGraphics/Platforms/IGraphicsLinuxWaylandClient.cpp")
   target_compile_definitions(${target} PRIVATE IPLUG_WAYLAND_CLIENT)
   target_link_libraries(${target} PRIVATE PkgConfig::IPLUG_WAYLAND)

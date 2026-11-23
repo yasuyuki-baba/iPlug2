@@ -171,6 +171,9 @@ protected:
   void CreatePlatformTextEntry(int paramIdx, const IText& text, const IRECT& bounds, int length, const char* str) override;
 
 private:
+  bool DispatchLinuxKey(bool pressed, KeySym symbol, const char* text, int length, bool shift, bool control, bool alt);
+  bool DispatchLinuxDrop(const unsigned char* data, size_t length, float x, float y);
+  bool PrepareLinuxDialog(void* dialog);
 #if defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU
   void PresentCPUFrame(const SkPixmap& pixels) override;
   void DestroyCPUImage();
@@ -183,6 +186,8 @@ private:
   void CloseWaylandWindow();
   void ResizeWaylandWindow();
   void PaintWaylandFrame(const SkPixmap& pixels);
+  bool ReadGtkWaylandClipboard(WDL_String& text);
+  bool WriteGtkWaylandClipboard(const char* text);
   GtkWidget* mWaylandWindow = nullptr;
   GtkWidget* mWaylandArea = nullptr;
   cairo_t* mWaylandPaint = nullptr;
@@ -195,6 +200,8 @@ private:
   void* GetWaylandClientWindow() const;
   void CloseWaylandClientWindow();
   void DrawWaylandClientWindow();
+  bool ReadWaylandClientClipboard(WDL_String& text);
+  bool WriteWaylandClientClipboard(const char* text);
 #ifdef IPLUG_WAYLAND_EGL
   void ActivateWaylandClientGL();
   void DeactivateWaylandClientGL();

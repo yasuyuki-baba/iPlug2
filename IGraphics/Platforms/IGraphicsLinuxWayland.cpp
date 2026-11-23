@@ -28,12 +28,71 @@ void* IGraphicsLinux::OpenWaylandWindow()
 
   mWaylandArea = gtk_drawing_area_new();
   gtk_container_add(GTK_CONTAINER(mWaylandWindow), mWaylandArea);
+  gtk_widget_set_can_focus(mWaylandArea, TRUE);
   gtk_widget_add_events(mWaylandArea, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
-    GDK_POINTER_MOTION_MASK | GDK_LEAVE_NOTIFY_MASK | GDK_SCROLL_MASK);
+    GDK_POINTER_MOTION_MASK | GDK_LEAVE_NOTIFY_MASK | GDK_SCROLL_MASK |
+    GDK_KEY_PRESS_MASK | GDK_KEY_RELEASE_MASK | GDK_FOCUS_CHANGE_MASK);
 
   OnViewInitialized(nullptr);
   GetDelegate()->LayoutUI(this);
+  AttachPopupMenuControl();
   SetAllControlsDirty();
+
+  auto* im = gtk_im_multicontext_new();
+  g_object_set_data_full(G_OBJECT(mWaylandArea), "iplug-im-context", im, g_object_unref);
+  gtk_im_context_set_use_preedit(im, FALSE);
+  g_signal_connect(mWaylandArea, "realize", G_CALLBACK(+[](GtkWidget* widget, gpointer data) {
+    gtk_im_context_set_client_window(GTK_IM_CONTEXT(data), gtk_widget_get_window(widget));
+  }), im);
+  g_signal_connect(mWaylandArea, "unrealize", G_CALLBACK(+[](GtkWidget*, gpointer data) {
+    gtk_im_context_set_client_window(GTK_IM_CONTEXT(data), nullptr);
+  }), im);
+  g_signal_connect(mWaylandArea, "focus-in-event", G_CALLBACK(+[](GtkWidget*, GdkEventFocus*, gpointer data) -> gboolean {
+    gtk_im_context_focus_in(GTK_IM_CONTEXT(data));
+    return FALSE;
+  }), im);
+  g_signal_connect(mWaylandArea, "focus-out-event", G_CALLBACK(+[](GtkWidget*, GdkEventFocus*, gpointer data) -> gboolean {
+    gtk_im_context_focus_out(GTK_IM_CONTEXT(data));
+    return FALSE;
+  }), im);
+  g_signal_connect(im, "commit", G_CALLBACK(+[](GtkIMContext* im, const gchar* text, gpointer data) {
+    auto& graphics = *static_cast<IGraphicsLinux*>(data);
+    if (!graphics.mCloseRequested)
+    {
+      DispatchScope dispatch(graphics.mDispatchDepth);
+      auto* event = static_cast<GdkEventKey*>(g_object_get_data(G_OBJECT(im), "iplug-key-event"));
+      const bool singleKey = event && *text && !*g_utf8_next_char(text) &&
+                             gdk_keyval_to_unicode(event->keyval) == g_utf8_get_char(text);
+      graphics.DispatchLinuxKey(true, singleKey ? event->keyval : 0, text, strlen(text),
+                                singleKey && (event->state & GDK_SHIFT_MASK), false, false);
+    }
+  }), this);
+  auto keyEvent = +[](GtkWidget* widget, GdkEventKey* event, gpointer data) -> gboolean {
+    auto& graphics = *static_cast<IGraphicsLinux*>(data);
+    if (graphics.mCloseRequested || graphics.IsInPlatformCallback())
+      return FALSE;
+    DispatchScope dispatch(graphics.mDispatchDepth);
+    const bool pressed = event->type == GDK_KEY_PRESS;
+    const bool shift = event->state & GDK_SHIFT_MASK;
+    const bool control = event->state & GDK_CONTROL_MASK;
+    const bool alt = event->state & GDK_MOD1_MASK;
+    auto* im = GTK_IM_CONTEXT(g_object_get_data(G_OBJECT(widget), "iplug-im-context"));
+    if (!control && !alt)
+    {
+      g_object_set_data(G_OBJECT(im), "iplug-key-event", event);
+      const bool consumed = gtk_im_context_filter_keypress(im, event);
+      g_object_set_data(G_OBJECT(im), "iplug-key-event", nullptr);
+      if (consumed)
+        return TRUE;
+    }
+    char text[8]{};
+    const auto unicode = gdk_keyval_to_unicode(event->keyval);
+    const int length = unicode && !g_unichar_iscntrl(unicode) ? g_unichar_to_utf8(unicode, text) : 0;
+    return graphics.DispatchLinuxKey(pressed, event->keyval, text, length, shift, control, alt);
+  };
+  g_signal_connect(mWaylandArea, "key-press-event", G_CALLBACK(keyEvent), this);
+  g_signal_connect(mWaylandArea, "key-release-event", G_CALLBACK(keyEvent), this);
+  gtk_widget_grab_focus(mWaylandArea);
 
   g_signal_connect(mWaylandArea, "draw", G_CALLBACK(+[](GtkWidget*, cairo_t* pContext, gpointer pData) -> gboolean {
     auto& graphics = *static_cast<IGraphicsLinux*>(pData);
@@ -67,13 +126,14 @@ void* IGraphicsLinux::OpenWaylandWindow()
     graphics.mInConfigureNotify = false;
   }), this);
 
-  g_signal_connect(mWaylandArea, "button-press-event", G_CALLBACK((+[](GtkWidget*, GdkEventButton* pEvent, gpointer pData) -> gboolean {
+  g_signal_connect(mWaylandArea, "button-press-event", G_CALLBACK((+[](GtkWidget* widget, GdkEventButton* pEvent, gpointer pData) -> gboolean {
     auto& graphics = *static_cast<IGraphicsLinux*>(pData);
     if (graphics.mCloseRequested || graphics.IsInPlatformCallback() ||
         (pEvent->button != GDK_BUTTON_PRIMARY && pEvent->button != GDK_BUTTON_SECONDARY))
       return FALSE;
 
     DispatchScope dispatch(graphics.mDispatchDepth);
+    gtk_widget_grab_focus(widget);
     graphics.mCursorX = pEvent->x / graphics.GetDrawScale();
     graphics.mCursorY = pEvent->y / graphics.GetDrawScale();
     const auto mod = MouseModifiers(pEvent->state, pEvent->button == GDK_BUTTON_PRIMARY,
@@ -131,6 +191,22 @@ void* IGraphicsLinux::OpenWaylandWindow()
     return FALSE;
   }), this);
 
+  GtkTargetEntry target{const_cast<char*>("text/uri-list"), 0, 0};
+  gtk_drag_dest_set(mWaylandArea, GTK_DEST_DEFAULT_ALL, &target, 1, GDK_ACTION_COPY);
+  g_signal_connect(mWaylandArea, "drag-data-received", G_CALLBACK(+[](GtkWidget*, GdkDragContext*, gint x, gint y,
+    GtkSelectionData* selection, guint, guint, gpointer data) {
+    auto& graphics = *static_cast<IGraphicsLinux*>(data);
+    if (graphics.mCloseRequested || graphics.IsInPlatformCallback())
+      return;
+    const int length = gtk_selection_data_get_length(selection);
+    if (length > 0)
+    {
+      DispatchScope dispatch(graphics.mDispatchDepth);
+      graphics.DispatchLinuxDrop(gtk_selection_data_get_data(selection), length,
+                                 x / graphics.GetDrawScale(), y / graphics.GetDrawScale());
+    }
+  }), this);
+
   g_signal_connect(mWaylandArea, "scroll-event", G_CALLBACK(+[](GtkWidget*, GdkEventScroll* pEvent, gpointer pData) -> gboolean {
     auto& graphics = *static_cast<IGraphicsLinux*>(pData);
     if (graphics.mCloseRequested || graphics.IsInPlatformCallback())
@@ -183,6 +259,25 @@ void IGraphicsLinux::CloseWaylandWindow()
 void IGraphicsLinux::ResizeWaylandWindow()
 {
   gtk_window_resize(GTK_WINDOW(mWaylandWindow), WindowWidth(), WindowHeight());
+}
+
+bool IGraphicsLinux::ReadGtkWaylandClipboard(WDL_String& text)
+{
+  DispatchScope dispatch(mDispatchDepth);
+  auto* clipboard = gtk_widget_get_clipboard(mWaylandArea, GDK_SELECTION_CLIPBOARD);
+  auto* value = gtk_clipboard_wait_for_text(clipboard);
+  if (!value)
+    return false;
+  text.Set(value);
+  g_free(value);
+  return true;
+}
+
+bool IGraphicsLinux::WriteGtkWaylandClipboard(const char* text)
+{
+  auto* clipboard = gtk_widget_get_clipboard(mWaylandArea, GDK_SELECTION_CLIPBOARD);
+  gtk_clipboard_set_text(clipboard, text ? text : "", -1);
+  return true;
 }
 
 void IGraphicsLinux::PaintWaylandFrame(const SkPixmap& pixels)

@@ -533,9 +533,7 @@ INT_PTR SWELLAppMain(int msg, INT_PTR parm1, INT_PTR parm2)
 #include "IPlugSWELL.h"
 #if defined IPLUG_EXPERIMENTAL_WAYLAND && ((defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU) || defined IPLUG_WAYLAND_EGL) && !defined NO_IGRAPHICS
   #include "IGraphicsLinux.h"
-  #ifndef IPLUG_WAYLAND_EGL
-    #include <gtk/gtk.h>
-  #endif
+  #include <gtk/gtk.h>
 #endif
 
 HWND gHWND;
@@ -548,8 +546,8 @@ static bool gNoIO = false;
 #if defined IPLUG_EXPERIMENTAL_WAYLAND && ((defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU) || defined IPLUG_WAYLAND_EGL) && !defined NO_IGRAPHICS
 static int RunWaylandStandalone()
 {
-#ifndef IPLUG_WAYLAND_EGL
   gdk_set_allowed_backends("wayland");
+#ifndef IPLUG_WAYLAND_EGL
   if (!gtk_init_check(nullptr, nullptr))
   {
     fprintf(stderr, "Could not connect to a Wayland compositor\n");
@@ -568,6 +566,7 @@ static int RunWaylandStandalone()
 
   auto* pPlug = pHost->GetPlug();
   auto* pGraphics = static_cast<igraphics::IGraphicsLinux*>(pPlug->GetUI());
+  GtkWindow* pPreferencesParent = nullptr;
 #ifdef IPLUG_WAYLAND_EGL
   if (!pGraphics->ConnectWaylandClient(BUNDLE_NAME) || !pPlug->OpenWindow(nullptr))
   {
@@ -575,16 +574,9 @@ static int RunWaylandStandalone()
     return EXIT_FAILURE;
   }
 
-  while (auto* pUI = static_cast<igraphics::IGraphicsLinux*>(pPlug->GetUI()))
-  {
-    if (pUI->WindowCloseRequested())
-      break;
-    pUI->OnDisplayTimer();
-    SWELL_RunMessageLoop();
-    Sleep(5);
-  }
 #else
   GtkWidget* pWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+  pPreferencesParent = GTK_WINDOW(pWindow);
   gtk_window_set_title(GTK_WINDOW(pWindow), BUNDLE_NAME);
   gtk_window_set_default_size(GTK_WINDOW(pWindow), pGraphics->WindowWidth(), pGraphics->WindowHeight());
   g_signal_connect(pWindow, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer) -> gboolean {
@@ -600,14 +592,35 @@ static int RunWaylandStandalone()
   }
 
   gtk_widget_show_all(pWindow);
-  while (!gStandaloneCloseRequested && pPlug->GetUI())
+#endif
+
+  bool showPreferences = false;
+  pGraphics->SetKeyHandlerFunc([handler = pGraphics->GetKeyHandlerFunc(), &showPreferences](const IKeyPress& key, bool isUp) {
+    if (!isUp && key.C && !key.A && !key.S && key.VK == kVK_P)
+    {
+      showPreferences = true;
+      return true;
+    }
+    return handler && handler(key, isUp);
+  });
+
+  while (auto* pUI = static_cast<igraphics::IGraphicsLinux*>(pPlug->GetUI()))
   {
+    if (gStandaloneCloseRequested || pUI->WindowCloseRequested())
+      break;
+#ifdef IPLUG_WAYLAND_EGL
+    pUI->OnDisplayTimer();
+#endif
     while (!gStandaloneCloseRequested && g_main_context_iteration(nullptr, FALSE))
       {}
-    SWELL_RunMessageLoop(); // Dispatch the existing standalone plug-in idle timer.
+    if (showPreferences && !gStandaloneCloseRequested && pPlug->GetUI() == pUI && !pUI->WindowCloseRequested())
+    {
+      showPreferences = false;
+      pHost->ShowWaylandPreferences(pPreferencesParent);
+    }
+    SWELL_RunMessageLoop();
     Sleep(5);
   }
-#endif
   pHost->CloseAudio();
   pHost->CloseWindow();
 #ifndef IPLUG_WAYLAND_EGL

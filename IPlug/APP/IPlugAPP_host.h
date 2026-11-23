@@ -210,6 +210,9 @@ public:
    * @param pWnd The standalone container window
    * @return The factor converting editor units to container (GDK) units: editor scale / GDK scale */
   static float ResolveLinuxScreenScale(HWND pWnd);
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && !defined NO_IGRAPHICS
+  void ShowWaylandPreferences(void* parent);
+#endif
 #endif
 
   bool Init();
@@ -236,7 +239,7 @@ public:
   bool InitMidi();
   void CloseAudio();
   bool InitAudio(uint32_t inId, uint32_t outId, uint32_t sr, uint32_t iovs);
-  bool AudioSettingsInStateAreEqual(AppState& os, AppState& ns);
+  bool AudioSettingsInStateAreEqual(const AppState& os, const AppState& ns);
   bool MIDISettingsInStateAreEqual(AppState& os, AppState& ns);
 
   bool TryToChangeAudioDriverType();
