@@ -10,6 +10,8 @@ import time
 
 
 PAYLOAD = b"".join(f"{i:08x}0123456789abcdef01234567".encode() for i in range(8192))
+KEYMAP = re.compile(r"wl_keyboard[@#]\d+\.keymap\(")
+SEAT_NAME = re.compile(r'wl_seat[@#]\d+\.name\("([^"]*iplug-seat2)"\)')
 SEND = re.compile(r'wl_data_source[@#]\d+\.send\(.*?, fd (\d+)\)')
 
 
@@ -46,9 +48,9 @@ def pipe_at(pid, fd):
         return None
 
 
-def stalled_paste(pid, log):
+def stalled_paste(pid, log, paste_command):
     requests = len(SEND.findall(log()))
-    reader = subprocess.Popen(["wl-paste", "--no-newline"], stdout=subprocess.PIPE)
+    reader = subprocess.Popen(paste_command, stdout=subprocess.PIPE)
     try:
         if not select.select([reader.stdout], [], [], 2)[0]:
             raise RuntimeError("the clipboard receiver did not get a first chunk")
@@ -89,27 +91,49 @@ def exercise(runtime, plugin, mode):
         )
         reader = None
         try:
-            x, y = wait_for(editor_position, "the clipboard test editor did not appear", timeout=5)
-            subprocess.run(
-                ["xdotool", "mousemove", str(x), str(y), "sleep", ".2",
-                 "click", "1", "sleep", ".2", "key", "F2"], check=True
-            )
-            wait_for(lambda: "CLAP clipboard copied" in log(), "the editor did not claim the clipboard")
+            if mode == "host-timer":
+                wait_for(lambda: '"wl_seat"' in log(), "the input seat did not appear", timeout=8)
+                startup, _ = log().split("CLAP editor shown", 1)
+                if '"wl_seat"' in startup:
+                    raise RuntimeError("the compositor advertised the seat before the editor opened")
+            wait_for(lambda: KEYMAP.search(log()), "the editor did not receive a keyboard keymap")
+
+            def copy():
+                copies = log().count("CLAP clipboard copied")
+                x, y = wait_for(editor_position, "the clipboard test editor did not appear", timeout=5)
+                subprocess.run(
+                    ["xdotool", "mousemove", str(x), str(y), "sleep", ".2",
+                     "click", "1", "sleep", ".2", "key", "F2"], check=True
+                )
+                wait_for(lambda: log().count("CLAP clipboard copied") > copies,
+                         "the editor did not claim the clipboard")
+
+            copy()
+            if mode == "host-timer":
+                keymaps = len(KEYMAP.findall(log()))
+                (runtime / "reconnect-input").touch()
+                wait_for(lambda: len(KEYMAP.findall(log())) > keymaps,
+                         "the editor did not switch to the new keyboard after RDP reconnect", timeout=8)
+                copy()
+
+            # Weston can keep the disconnected seat advertised with no capabilities.
+            seat = wait_for(lambda: SEAT_NAME.search(log()), "the replacement seat was not named")
+            paste_command = ["wl-paste", "--no-newline", "--seat", seat[1]]
             commands["HIDE"].touch()
             wait_for(lambda: "CLAP editor hidden" in log(), "the editor did not hide")
 
-            data = subprocess.check_output(["wl-paste", "--no-newline"], timeout=3)
+            data = subprocess.check_output(paste_command, timeout=3)
             if data != PAYLOAD:
                 raise RuntimeError(f"wrong clipboard payload after hide ({len(data)} bytes)")
 
-            reader, fd, pipe = stalled_paste(host.pid, log)
+            reader, fd, pipe = stalled_paste(host.pid, log, paste_command)
             reader.kill()
             reader.wait(timeout=2)
             reader.stdout.close()
             reader = None
             wait_for(lambda: pipe_at(host.pid, fd) != pipe, "cancelled transfer left its FD open")
 
-            reader, fd, pipe = stalled_paste(host.pid, log)
+            reader, fd, pipe = stalled_paste(host.pid, log, paste_command)
             commands["DESTROY"].touch()
             wait_for(lambda: "CLAP editor destroyed" in log(), "the GUI did not destroy during transfer")
             if host.poll() is not None or pipe_at(host.pid, fd) == pipe:

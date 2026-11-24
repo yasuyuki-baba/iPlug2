@@ -113,7 +113,6 @@ the raw surface's key callbacks deliver XKB text and Compose.
 This integration test uses a local Weston RDP session to send a copy keypress
 and a separate Wayland client to read the clipboard. Install Weston with its RDP
 backend, FreeRDP, Xvfb, Xdotool, ImageMagick, OpenSSL, Python 3 and `wl-clipboard`.
-The script uses `wayland-info` or `weston-info` to wait for the input seat.
 Set `FREERDP=xfreerdp3` if the client executable has that name.
 
 ```sh
@@ -129,6 +128,9 @@ The test compares all 256 KiB after hide, verifies that closing a receiver
 releases the write pipe, and destroys the GUI while a second receiver is still
 blocked. It checks that the pipe closes while the host process is still
 running. All cases run with an accepted, unavailable and rejected host timer.
+In the first run, the editor opens before the RDP client connects and creates
+the compositor's input seat. The test also reconnects RDP with the same editor
+open and verifies that copying works on the replacement seat.
 
 ## NanoVG/GL3 and Skia/GL3 with EGL
 

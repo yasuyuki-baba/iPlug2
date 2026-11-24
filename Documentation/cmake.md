@@ -697,7 +697,8 @@ emrun --no_emrun_detect index.html
   POSIX fd extensions when available, and fall back to `on_main_thread` callbacks
 - The default Linux editor runs through X11 (XWayland in a Wayland session).
   The experimental Wayland options support Skia/CPU, Skia/GL3 and
-  NanoVG/GL3. Both GL3 renderers use EGL on Wayland and GLX on X11.
+  NanoVG/GL3. CMake reports an error when Wayland is explicitly enabled for an
+  IGraphics target with another renderer. Both GL3 renderers use EGL on Wayland and GLX on X11.
   Standalone selects Wayland with `--wayland`, VST3 can embed in a host that provides
   a VST3 Wayland connection, and CLAP can open a floating editor.
   In the Wayland standalone app, Ctrl+P opens Audio and MIDI Settings.

@@ -143,6 +143,7 @@ void ReleaseEGLDisplay(EGLDisplay display)
 
 struct IGraphicsLinux::WaylandClientSurface
 {
+  wl_registry* mRegistry = nullptr;
   bool mHostReadsEvents = false;
   int mBufferScale = 1;
   wl_event_queue* mQueue = nullptr;
@@ -304,7 +305,6 @@ struct IGraphicsLinux::WaylandClientSurface
 
   bool mHidden = false;
   bool mNeedsRemap = false;
-  wl_registry* mRegistry = nullptr;
   struct Output
   {
     wl_output* proxy = nullptr;
@@ -406,6 +406,23 @@ struct IGraphicsLinux::WaylandClientSurface
     return true;
   }
 #endif
+  struct Seat
+  {
+    WaylandClientSurface* window;
+    wl_seat* proxy;
+    uint32_t capabilities = 0;
+
+    Seat(WaylandClientSurface* window, wl_seat* proxy) : window(window), proxy(proxy) {}
+
+    ~Seat()
+    {
+      if (wl_seat_get_version(proxy) >= WL_SEAT_RELEASE_SINCE_VERSION)
+        wl_seat_release(proxy);
+      else
+        wl_seat_destroy(proxy);
+    }
+  };
+  std::map<uint32_t, Seat> mSeats;
   wl_seat* mSeat = nullptr;
   wl_pointer* mPointer = nullptr;
   wl_keyboard* mKeyboard = nullptr;
@@ -651,7 +668,7 @@ struct IGraphicsLinux::WaylandClientSurface
 
   void CreateDataDevice()
   {
-    if (!mDataManager || !mSeat)
+    if (mDataDevice || !mDataManager || !mSeat)
       return;
     mDataDevice = wl_data_device_manager_get_data_device(mDataManager, mSeat);
     if (!mDataDevice)
@@ -901,36 +918,96 @@ struct IGraphicsLinux::WaylandClientSurface
     ClearKeyboardFocus();
   }
 
-  static void SeatCapabilities(void* pData, wl_seat* pSeat, uint32_t capabilities)
+  void ApplySeatCapabilities(uint32_t capabilities)
   {
-    auto& window = *static_cast<WaylandClientSurface*>(pData);
     if (capabilities & WL_SEAT_CAPABILITY_POINTER)
     {
-      if (!window.mPointer)
+      if (!mPointer)
       {
-        window.mPointer = wl_seat_get_pointer(pSeat);
-        if (window.mPointer)
-          wl_pointer_add_listener(window.mPointer, &PointerListener(), &window);
+        mPointer = wl_seat_get_pointer(mSeat);
+        if (mPointer)
+          wl_pointer_add_listener(mPointer, &PointerListener(), this);
       }
     }
-    else if (window.mPointer)
+    else if (mPointer)
     {
-      window.ReleasePointer();
-      window.mPointer = nullptr;
-      window.mOverSurface = window.mLeft = window.mRight = false;
-      window.mGraphics->ReleaseMouseCapture();
+      ReleasePointer();
+      mPointer = nullptr;
+      mOverSurface = mLeft = mRight = false;
+      mGraphics->ReleaseMouseCapture();
     }
-    if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && !window.mKeyboard)
+    if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && !mKeyboard)
     {
-      window.mKeyboard = wl_seat_get_keyboard(pSeat);
-      if (window.mKeyboard)
-        wl_keyboard_add_listener(window.mKeyboard, &KeyboardListener(), &window);
+      mKeyboard = wl_seat_get_keyboard(mSeat);
+      if (mKeyboard)
+        wl_keyboard_add_listener(mKeyboard, &KeyboardListener(), this);
     }
-    else if (!(capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && window.mKeyboard)
+    else if (!(capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && mKeyboard)
     {
-      window.ClearKeyboardFocus(true);
-      window.ReleaseKeyboard();
+      ClearKeyboardFocus(true);
+      ReleaseKeyboard();
     }
+  }
+
+  void SelectInputSeat()
+  {
+    const auto active = std::find_if(mSeats.begin(), mSeats.end(), [this](const auto& item) {
+      return item.second.proxy == mSeat && item.second.capabilities;
+    });
+    if (active != mSeats.end())
+    {
+      ApplySeatCapabilities(active->second.capabilities);
+      return;
+    }
+
+    if (mSeat)
+    {
+      ApplySeatCapabilities(0);
+      ClearKeyboardFocus();
+      xkb_state_unref(mXkbState);
+      mXkbState = nullptr;
+      ReleaseDataDevice();
+    }
+
+    const auto next = std::find_if(mSeats.begin(), mSeats.end(), [](const auto& item) {
+      return item.second.capabilities != 0;
+    });
+    mSeat = next == mSeats.end() ? nullptr : next->second.proxy;
+    if (mSeat)
+    {
+      ApplySeatCapabilities(next->second.capabilities);
+      CreateDataDevice();
+    }
+  }
+
+  void BindSeat(wl_registry* registry, uint32_t name, uint32_t version)
+  {
+    auto* proxy = static_cast<wl_seat*>(wl_registry_bind(registry, name, &wl_seat_interface, std::min(version, 7u)));
+    if (!proxy)
+      return;
+    auto& seat = mSeats.try_emplace(name, this, proxy).first->second;
+    static const wl_seat_listener listener{
+      [](void* data, wl_seat*, uint32_t capabilities) {
+        auto& seat = *static_cast<Seat*>(data);
+        seat.capabilities = capabilities & (WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
+        seat.window->SelectInputSeat();
+      },
+      [](void*, wl_seat*, const char*) {}
+    };
+    wl_seat_add_listener(proxy, &listener, &seat);
+  }
+
+  void RemoveSeat(uint32_t name)
+  {
+    const auto seat = mSeats.find(name);
+    if (seat == mSeats.end())
+      return;
+    if (seat->second.proxy == mSeat)
+    {
+      seat->second.capabilities = 0;
+      SelectInputSeat();
+    }
+    mSeats.erase(seat);
   }
 
   void ReleasePointer()
@@ -1035,6 +1112,31 @@ struct IGraphicsLinux::WaylandClientSurface
       graphics.OnMouseOver(nextX, nextY, mod);
   }
 
+  void ReleaseDataDevice()
+  {
+    if (mClipboardRead) close(mClipboardRead->fd);
+    mClipboardRead.reset();
+    if (mDropRead) close(mDropRead->fd);
+    mDropRead.reset();
+    for (const auto& transfer : mClipboardWrites)
+      close(transfer.fd);
+    mClipboardWrites.clear();
+    if (mClipboardSource) wl_data_source_destroy(mClipboardSource);
+    mClipboardSource = nullptr;
+    for (const auto& entry : mOffers)
+      wl_data_offer_destroy(entry.first);
+    mOffers.clear();
+    mSelection = mDrop = nullptr;
+    if (mDataDevice)
+    {
+      if (wl_data_device_get_version(mDataDevice) >= WL_DATA_DEVICE_RELEASE_SINCE_VERSION)
+        wl_data_device_release(mDataDevice);
+      else
+        wl_data_device_destroy(mDataDevice);
+      mDataDevice = nullptr;
+    }
+  }
+
   ~WaylandClientSurface()
   {
 #ifdef IPLUG_WAYLAND_EGL
@@ -1042,34 +1144,15 @@ struct IGraphicsLinux::WaylandClientSurface
 #endif
     if (mPointer) ReleasePointer();
     if (mKeyboard) ReleaseKeyboard();
-    if (mClipboardRead) close(mClipboardRead->fd);
-    if (mDropRead) close(mDropRead->fd);
-    for (const auto& transfer : mClipboardWrites)
-      close(transfer.fd);
-    if (mClipboardSource) wl_data_source_destroy(mClipboardSource);
-    for (const auto& entry : mOffers)
-      wl_data_offer_destroy(entry.first);
-    if (mDataDevice)
-    {
-      if (wl_data_device_get_version(mDataDevice) >= WL_DATA_DEVICE_RELEASE_SINCE_VERSION)
-        wl_data_device_release(mDataDevice);
-      else
-        wl_data_device_destroy(mDataDevice);
-    }
+    ReleaseDataDevice();
     if (mDataManager) wl_data_device_manager_destroy(mDataManager);
     xkb_compose_state_unref(mCompose);
     xkb_state_unref(mXkbState);
     xkb_context_unref(mXkbContext);
-    if (mSeat)
-    {
-      if (wl_seat_get_version(mSeat) >= WL_SEAT_RELEASE_SINCE_VERSION)
-        wl_seat_release(mSeat);
-      else
-        wl_seat_destroy(mSeat);
-    }
+    mSeats.clear();
+    if (mRegistry) wl_registry_destroy(mRegistry);
 #ifdef IPLUG_WAYLAND_TOPLEVEL
     mOutputs.clear();
-    if (mRegistry) wl_registry_destroy(mRegistry);
     if (mToplevel) xdg_toplevel_destroy(mToplevel);
     if (mXdgSurface) xdg_surface_destroy(mXdgSurface);
     if (mShell) xdg_wm_base_destroy(mShell);
@@ -1155,31 +1238,23 @@ void* IGraphicsLinux::OpenWaylandClientWindow()
           xdg_wm_base_add_listener(window.mShell, &shellListener, &window);
       }
 #endif
-      else if (!window.mSeat && strcmp(interface, wl_seat_interface.name) == 0)
-      {
-        window.mSeat = static_cast<wl_seat*>(wl_registry_bind(pRegistry, name, &wl_seat_interface, std::min(version, 7u)));
-        static const wl_seat_listener seatListener{WaylandClientSurface::SeatCapabilities, [](void*, wl_seat*, const char*) {}};
-        if (window.mSeat)
-          wl_seat_add_listener(window.mSeat, &seatListener, &window);
-      }
+      else if (strcmp(interface, wl_seat_interface.name) == 0)
+        window.BindSeat(pRegistry, name, version);
+      window.CreateDataDevice();
     },
     [](void* data, wl_registry*, uint32_t name) {
+      auto& window = *static_cast<WaylandClientSurface*>(data);
+      window.RemoveSeat(name);
 #ifdef IPLUG_WAYLAND_TOPLEVEL
-      static_cast<WaylandClientSurface*>(data)->mOutputs.erase(name);
+      window.mOutputs.erase(name);
 #endif
     }
   };
+  window->mRegistry = pRegistry;
   wl_registry_add_listener(pRegistry, &registryListener, window.get());
   const int result = wl_display_roundtrip_queue(mWaylandClientDisplay, window->mQueue);
-#ifdef IPLUG_WAYLAND_TOPLEVEL
-  if (!mWaylandClientParent)
-    window->mRegistry = pRegistry;
-  else
-#endif
-    wl_registry_destroy(pRegistry);
   if (result < 0 || !window->mCompositor)
     return nullptr;
-  window->CreateDataDevice();
 #ifndef IPLUG_WAYLAND_EGL
   if (!window->mShm)
     return nullptr;
