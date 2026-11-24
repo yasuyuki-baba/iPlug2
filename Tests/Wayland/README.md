@@ -57,14 +57,15 @@ checks that the editor attaches and submits a buffer, then
 removes it and verifies that the connection and timer have been returned.
 It repeats this sequence three times and checks for protocol errors.
 The test uses an unmapped parent on headless Weston.
+Pass `--concurrent` as the last argument to run 50 cycles while a host
+thread independently reads and dispatches events on the shared connection.
 
 For a visible test, start the Steinberg SDK's `editorhost` built with
 `SMTG_ENABLE_WAYLAND_SUPPORT=ON` and pass it the `IPlugEffect.vst3` bundle.
 The SDK example needs a compositor seat. In OrbStack, Weston with an active
 RDP client provides one. This configuration was used to verify initial
-display and dragging a knob with XWayland disabled. The prototype has been
-checked at scale 1. DAW compatibility and compositor-specific scaling
-remain open. The VST3 host's Wayland connection determines which seat
+display and dragging a knob with XWayland disabled. The smoke host also sets a 2× VST3 content scale and checks the subsurface
+buffer scale. Fractional scaling and real DAW compatibility remain open. The VST3 host's Wayland connection determines which seat
 and data-device interfaces the editor can use.
 
 ## Experimental CLAP floating editor
@@ -88,13 +89,18 @@ editor. To test without a DAW, the smoke test loads the actual module in a
 small CLAP host, checks repeated show/hide and destruction, and verifies
 the host's close notification when the Wayland connection is lost.
 
-The prototype has been checked at scale 1. Decorations depend on the
-compositor, and transient parenting is unavailable. DAW compatibility
-and compositor-specific HiDPI remain open.
+The floating editor uses the highest integer scale of the outputs it occupies.
+The smoke test checks a 2× output and reuses the editor and its Wayland surface
+across three show/hide cycles. Decorations depend on the compositor.
+Transient parenting, fractional buffer scales and real DAW testing remain open.
 
 The native client handles key events and XKB Compose when the compositor
 provides a keyboard. Clipboard text and local file drops use the Wayland
-data-device interface. File, directory, color and text-entry dialogs use
+data-device interface. For clipboard paste, use `RequestClipboardText()`
+to allow other editors on the same GUI thread to supply the text while
+the event loop continues to run. The synchronous getter can wait up to 500 ms
+for a selection owner. File drops use nonblocking transfers and retain the
+drop coordinates until the URI list arrives. File, directory, color and text-entry dialogs use
 GTK 3 on Wayland. The GTK text-entry dialog provides the desktop IME;
 the raw surface's key callbacks deliver XKB text and Compose.
 
@@ -125,3 +131,22 @@ EGL-built modules. With Mesa and a headless Pixman Weston, set
 On a VST3 host connection where window EGL cannot initialize, the editor
 tries offscreen EGL via the Mesa surfaceless platform and submits frames
 through `wl_shm`. This path reads each frame back from OpenGL.
+
+The VST3 editor uses the connection returned by `openWaylandConnection()`
+and returns it through `closeWaylandConnection()`. The connection's
+event queue is dispatched on the host UI thread. Hosts sharing a connection
+across threads must promptly complete or cancel any prepared reads.
+
+The SDK editorhost opens a separate client connection for each editor. The
+default event loop reads that connection. VST3 does not expose a query for
+socket read ownership. If a host continuously reads the same connection for
+the plug-in after attachment, start that host with
+`IPLUG_VST3_WAYLAND_HOST_READS=1`. The editor then dispatches pending events
+on its own queue on GUI ticks. GL renderers use offscreen EGL and shared
+memory in this mode so that swapping a buffer cannot read the host socket.
+Initial attachment still performs synchronous Wayland round trips and requires
+the compositor and other prepared readers to make progress. Leave the variable
+unset for hosts such as the SDK editorhost that supply a dedicated connection.
+
+Pass `--host-reads` to the VST3 smoke script to test timer dispatch and
+removal with a readable socket while the host holds a prepared read.

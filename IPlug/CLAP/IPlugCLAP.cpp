@@ -1034,6 +1034,15 @@ bool IPlugCLAP::guiShow() noexcept
       return false;
 
     auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI());
+    if (pGraphics->WindowIsOpen())
+    {
+      if (!RegisterLinuxHostCallbacks())
+        return false;
+      mGUIOpen = pGraphics->SetWaylandClientVisible(true);
+      if (!mGUIOpen)
+        UnregisterLinuxHostCallbacks();
+      return mGUIOpen;
+    }
     if (!pGraphics->ConnectWaylandClient(mWaylandGuiTitle.Get()) || !GUIWindowAttach(nullptr))
     {
       CloseWindow();
@@ -1074,6 +1083,20 @@ bool IPlugCLAP::guiHide() noexcept
 #endif
 #if defined OS_LINUX && !defined NO_IGRAPHICS
   UnregisterLinuxHostCallbacks();
+#endif
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandGui)
+  {
+    if (!mGUIOpen)
+      return true;
+    if (static_cast<IGraphicsLinux*>(GetUI())->SetWaylandClientVisible(false))
+    {
+      mGUIOpen = false;
+      return true;
+    }
+    CheckLinuxGuiClosed();
+    return false;
+  }
 #endif
   if (HasUI())
   {

@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <map>
+#include <optional>
 #include <poll.h>
 #include <signal.h>
 #include <string>
@@ -45,6 +46,7 @@ constexpr const char* kTextMime = "text/plain";
 constexpr const char* kFilesMime = "text/uri-list";
 constexpr size_t kMaxWaylandTransfer = 1024 * 1024;
 constexpr auto kWaylandTransferTimeout = std::chrono::milliseconds(500);
+constexpr auto kWaylandClipboardTimeout = std::chrono::seconds(3);
 
 bool WaitForWaylandTransfer(int fd, short events, std::chrono::steady_clock::time_point deadline)
 {
@@ -53,38 +55,30 @@ bool WaitForWaylandTransfer(int fd, short events, std::chrono::steady_clock::tim
   return remaining > 0 && poll(&descriptor, 1, remaining) > 0;
 }
 
-void SendWaylandText(int fd, const char* text, size_t length)
+ssize_t WriteWaylandPipe(int fd, const char* text, size_t length)
 {
-  const int flags = fcntl(fd, F_GETFL);
-  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-    return;
-
   // A clipboard reader may cancel by closing its pipe. Do not deliver
   // SIGPIPE to the DAW, or alter the process-wide signal handler.
   sigset_t sigpipe, previous, pending;
   sigemptyset(&sigpipe);
   sigaddset(&sigpipe, SIGPIPE);
-  if (pthread_sigmask(SIG_BLOCK, &sigpipe, &previous) != 0)
-    return;
-  const bool wasPending = sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE);
-  const auto deadline = std::chrono::steady_clock::now() + kWaylandTransferTimeout;
-  size_t offset = 0;
-  while (offset < length && WaitForWaylandTransfer(fd, POLLOUT, deadline))
+  const int error = pthread_sigmask(SIG_BLOCK, &sigpipe, &previous);
+  if (error)
   {
-    const auto written = write(fd, text + offset, length - offset);
-    if (written > 0)
-      offset += written;
-    else if (written < 0 && errno != EAGAIN && errno != EINTR)
-    {
-      if (errno == EPIPE && !wasPending)
-      {
-        timespec timeout{};
-        sigtimedwait(&sigpipe, nullptr, &timeout);
-      }
-      break;
-    }
+    errno = error;
+    return -1;
+  }
+  const bool wasPending = sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE);
+  const auto written = write(fd, text, length);
+  const int writeError = errno;
+  if (written < 0 && writeError == EPIPE && !wasPending)
+  {
+    timespec timeout{};
+    sigtimedwait(&sigpipe, nullptr, &timeout);
   }
   pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+  errno = writeError;
+  return written;
 }
 }
 
@@ -94,30 +88,40 @@ namespace
 struct EGLDisplayUse
 {
   int users = 0;
-  bool initializedHere = false;
+  bool terminate = false;
 };
 
 std::mutex sEGLDisplayMutex;
 std::map<EGLDisplay, EGLDisplayUse> sEGLDisplays;
 
-// Editors may share a wl_display. Keep EGL alive until the last editor closes
-// and preserve EGL displays that the host already initialized.
 EGLDisplay AcquireEGLDisplay(EGLenum platform, void* pNativeDisplay)
 {
-  EGLDisplay display = eglGetPlatformDisplay(platform, pNativeDisplay, nullptr);
+  EGLDisplay display = EGL_NO_DISPLAY;
+  const char* extensions = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+  if (extensions && std::string(" ").append(extensions).append(" ").find(" EGL_KHR_display_reference ") != std::string::npos)
+  {
+    const EGLAttrib attrs[] = {EGL_TRACK_REFERENCES_KHR, EGL_TRUE, EGL_NONE};
+    display = eglGetPlatformDisplay(platform, pNativeDisplay, attrs);
+  }
+  const bool tracked = display != EGL_NO_DISPLAY;
+  if (!tracked)
+    display = eglGetPlatformDisplay(platform, pNativeDisplay, nullptr);
   if (display == EGL_NO_DISPLAY)
     return EGL_NO_DISPLAY;
 
   const std::lock_guard<std::mutex> lock(sEGLDisplayMutex);
   auto& use = sEGLDisplays[display];
-  if (use.users == 0 && !eglQueryString(display, EGL_VERSION))
+  if (use.users == 0 && (tracked || !eglQueryString(display, EGL_VERSION)))
   {
     if (!eglInitialize(display, nullptr, nullptr))
     {
       sEGLDisplays.erase(display);
       return EGL_NO_DISPLAY;
     }
-    use.initializedHere = true;
+    // An untracked surfaceless display uses the process-wide default
+    // native display. Another DSO can use it without appearing in this map.
+    // Release each editor's surface and context, and keep that display alive.
+    use.terminate = tracked || platform != EGL_PLATFORM_SURFACELESS_MESA;
   }
   ++use.users;
   return display;
@@ -129,7 +133,7 @@ void ReleaseEGLDisplay(EGLDisplay display)
   auto it = sEGLDisplays.find(display);
   if (--it->second.users == 0)
   {
-    if (it->second.initializedHere)
+    if (it->second.terminate)
       eglTerminate(display);
     sEGLDisplays.erase(it);
   }
@@ -139,11 +143,30 @@ void ReleaseEGLDisplay(EGLDisplay display)
 
 struct IGraphicsLinux::WaylandClientSurface
 {
+  bool mHostReadsEvents = false;
+  int mBufferScale = 1;
   wl_event_queue* mQueue = nullptr;
   wl_compositor* mCompositor = nullptr;
   wl_subcompositor* mSubcompositor = nullptr;
   wl_shm* mShm = nullptr;
-  wl_buffer* mBuffers[2]{};
+  struct FrameBuffer
+  {
+    wl_buffer* buffer = nullptr;
+    void* pixels = MAP_FAILED;
+    int width = 0, height = 0;
+    bool busy = false;
+
+    void Reset()
+    {
+      if (buffer) wl_buffer_destroy(buffer);
+      if (pixels != MAP_FAILED) munmap(pixels, size_t(width) * height * 4);
+      buffer = nullptr;
+      pixels = MAP_FAILED;
+      busy = false;
+    }
+
+  };
+  FrameBuffer mBuffers[2];
   wl_surface* mSurface = nullptr;
   wl_subsurface* mSubsurface = nullptr;
 #ifdef IPLUG_WAYLAND_EGL
@@ -265,6 +288,65 @@ struct IGraphicsLinux::WaylandClientSurface
   int mPendingHeight = 0;
   bool mConfigured = false;
 
+  bool mHidden = false;
+  bool mNeedsRemap = false;
+  wl_registry* mRegistry = nullptr;
+  struct Output
+  {
+    wl_output* proxy = nullptr;
+    int scale = 1;
+    bool entered = false;
+    ~Output()
+    {
+      if (proxy && wl_output_get_version(proxy) >= WL_OUTPUT_RELEASE_SINCE_VERSION)
+        wl_output_release(proxy);
+      else if (proxy)
+        wl_output_destroy(proxy);
+    }
+  };
+  std::map<uint32_t, Output> mOutputs;
+
+  void BindOutput(wl_registry* registry, uint32_t name, uint32_t version)
+  {
+    auto& output = mOutputs[name];
+    output.proxy = static_cast<wl_output*>(wl_registry_bind(registry, name, &wl_output_interface, std::min(version, 3u)));
+    if (!output.proxy)
+      return;
+    static const auto listener = [] {
+      wl_output_listener value{};
+      value.geometry = [](void*, wl_output*, int32_t, int32_t, int32_t, int32_t, int32_t, const char*, const char*, int32_t) {};
+      value.mode = [](void*, wl_output*, uint32_t, int32_t, int32_t, int32_t) {};
+      value.done = [](void*, wl_output*) {};
+      value.scale = [](void* data, wl_output*, int32_t scale) { static_cast<Output*>(data)->scale = std::max(1, scale); };
+      return value;
+    }();
+    wl_output_add_listener(output.proxy, &listener, &output);
+  }
+
+  void SetOutputEntered(wl_output* proxy, bool entered)
+  {
+    for (auto& item : mOutputs)
+      if (item.second.proxy == proxy)
+        item.second.entered = entered;
+  }
+
+  void UpdateBufferScale()
+  {
+    if (wl_surface_get_version(mSurface) < WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION)
+      return;
+    int scale = 1;
+    for (const auto& item : mOutputs)
+      if (item.second.entered)
+        scale = std::max(scale, item.second.scale);
+    if (scale != mBufferScale)
+    {
+      mBufferScale = scale;
+      wl_surface_set_buffer_scale(mSurface, scale);
+      mGraphics->SetScreenScale(scale);
+      mGraphics->mNeedsRedraw = true;
+    }
+  }
+
   bool CreateToplevel(const char* title, const char* appID)
   {
     if (!mShell)
@@ -282,7 +364,7 @@ struct IGraphicsLinux::WaylandClientSurface
         if (!graphics.mCloseRequested)
         {
           if (window.mPendingWidth > 0 && window.mPendingHeight > 0)
-            graphics.ResizeFromHost(window.mPendingWidth, window.mPendingHeight);
+            graphics.ResizeFromHost(window.mPendingWidth * window.mBufferScale, window.mPendingHeight * window.mBufferScale);
           graphics.mNeedsRedraw = true;
         }
       }
@@ -327,6 +409,23 @@ struct IGraphicsLinux::WaylandClientSurface
   wl_data_offer* mDrop = nullptr;
   wl_data_source* mClipboardSource = nullptr;
   WDL_String mClipboardText;
+  struct OfferRead
+  {
+    int fd;
+    std::chrono::steady_clock::time_point deadline;
+    std::string text;
+    std::function<void(const std::string*)> done;
+  };
+  struct ClipboardWrite
+  {
+    int fd;
+    std::chrono::steady_clock::time_point deadline;
+    std::string text;
+    size_t offset = 0;
+  };
+  std::optional<OfferRead> mClipboardRead;
+  std::optional<OfferRead> mDropRead;
+  std::vector<ClipboardWrite> mClipboardWrites;
   struct Offer
   {
     const char* textMime = nullptr;
@@ -385,10 +484,150 @@ struct IGraphicsLinux::WaylandClientSurface
     return success;
   }
 
+  void RequestClipboard(std::function<void(const char*)> done)
+  {
+    if (!done)
+      return;
+    if (mClipboardSource)
+    {
+      const std::string text = mClipboardText.Get();
+      done(text.c_str());
+      return;
+    }
+    const auto offer = mOffers.find(mSelection);
+    if (offer == mOffers.end() || !offer->second.textMime)
+      return;
+
+    StartRead(offer->first, offer->second.textMime, mClipboardRead, [done = std::move(done)](const std::string* text) {
+      if (text)
+        done(text->c_str());
+    });
+  }
+
+  bool StartRead(wl_data_offer* offer, const char* mime, std::optional<OfferRead>& slot,
+                 std::function<void(const std::string*)> done)
+  {
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) != 0)
+      return false;
+    if (fcntl(fds[0], F_SETFL, O_NONBLOCK) < 0)
+    {
+      close(fds[0]);
+      close(fds[1]);
+      return false;
+    }
+    if (slot)
+    {
+      close(slot->fd);
+      slot->done(nullptr);
+    }
+    slot = OfferRead{fds[0], std::chrono::steady_clock::now() + kWaylandClipboardTimeout, {}, std::move(done)};
+    wl_data_offer_receive(offer, mime, fds[1]);
+    close(fds[1]);
+    return true;
+  }
+
+  void ReceiveDrop()
+  {
+    auto* offer = mDrop;
+    if (!offer || mGraphics->mCloseRequested)
+    {
+      ClearOffer(mDrop);
+      return;
+    }
+    // Leave can arrive while the source is still writing to the pipe.
+    mDrop = nullptr;
+    if (!StartRead(offer, kFilesMime, mDropRead, [this, offer, x = mDropX, y = mDropY](const std::string* files) mutable {
+      if (files && wl_data_offer_get_version(offer) >= WL_DATA_OFFER_FINISH_SINCE_VERSION &&
+          mOffers.at(offer).action == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY)
+        wl_data_offer_finish(offer);
+      ClearOffer(offer);
+      if (files)
+        mGraphics->DispatchLinuxDrop(reinterpret_cast<const unsigned char*>(files->data()), files->size(), x, y);
+    }))
+      ClearOffer(offer);
+  }
+
+  void QueueClipboardWrite(int fd)
+  {
+    const int flags = fcntl(fd, F_GETFL);
+    if (mClipboardWrites.size() >= 8 || flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+    {
+      close(fd);
+      return;
+    }
+    mClipboardWrites.push_back({fd, std::chrono::steady_clock::now() + kWaylandClipboardTimeout, mClipboardText.Get()});
+  }
+
+  void PumpClipboardTransfers()
+  {
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = mClipboardWrites.begin(); it != mClipboardWrites.end();)
+    {
+      auto& transfer = *it;
+      bool pending = now < transfer.deadline && transfer.offset < transfer.text.size();
+      if (pending)
+      {
+        const auto written = WriteWaylandPipe(transfer.fd, transfer.text.data() + transfer.offset,
+                                              transfer.text.size() - transfer.offset);
+        if (written > 0)
+        {
+          transfer.offset += written;
+          pending = transfer.offset < transfer.text.size();
+        }
+        else
+          pending = written < 0 && (errno == EAGAIN || errno == EINTR);
+      }
+      if (pending)
+        ++it;
+      else
+      {
+        close(transfer.fd);
+        it = mClipboardWrites.erase(it);
+      }
+    }
+
+    PumpRead(mClipboardRead);
+    if (!mGraphics->mCloseRequested)
+      PumpRead(mDropRead);
+  }
+
+  void PumpRead(std::optional<OfferRead>& slot)
+  {
+    if (!slot)
+      return;
+    auto& transfer = *slot;
+    bool success = false;
+    // Limit the amount of work on any one tick even if the writer produces
+    // data faster than the pipe can be drained.
+    if (std::chrono::steady_clock::now() < transfer.deadline)
+    {
+      for (int chunk = 0; chunk < 16; ++chunk)
+      {
+        char bytes[4096];
+        const auto count = read(transfer.fd, bytes, sizeof(bytes));
+        if (count < 0 && (errno == EAGAIN || errno == EINTR))
+          return;
+        if (count <= 0 || transfer.text.size() + count > kMaxWaylandTransfer)
+        {
+          success = count == 0;
+          break;
+        }
+        transfer.text.append(bytes, count);
+        if (chunk == 15)
+          return;
+      }
+    }
+    close(transfer.fd);
+    auto result = std::move(transfer);
+    slot.reset();
+    result.done(success && !mGraphics->mCloseRequested ? &result.text : nullptr);
+  }
+
   void SetDropLocation(wl_fixed_t x, wl_fixed_t y)
   {
-    mDropX = wl_fixed_to_double(x) / mGraphics->GetTotalScale();
-    mDropY = wl_fixed_to_double(y) / mGraphics->GetTotalScale();
+    mDropX = wl_fixed_to_double(x) * mBufferScale / mGraphics->GetTotalScale();
+    mDropY = wl_fixed_to_double(y) * mBufferScale / mGraphics->GetTotalScale();
   }
 
   void CreateDataDevice()
@@ -442,19 +681,7 @@ struct IGraphicsLinux::WaylandClientSurface
         static_cast<WaylandClientSurface*>(data)->SetDropLocation(x, y);
       },
       [](void* data, wl_data_device*) {
-        auto& window = *static_cast<WaylandClientSurface*>(data);
-        std::string contents;
-        const auto info = window.mOffers.find(window.mDrop);
-        if (!window.mGraphics->mCloseRequested && info != window.mOffers.end() &&
-            window.ReceiveOffer(window.mDrop, kFilesMime, contents))
-        {
-          if (wl_data_offer_get_version(window.mDrop) >= WL_DATA_OFFER_FINISH_SINCE_VERSION &&
-              info->second.action == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY)
-            wl_data_offer_finish(window.mDrop);
-          window.mGraphics->DispatchLinuxDrop(reinterpret_cast<const unsigned char*>(contents.data()),
-                                               contents.size(), window.mDropX, window.mDropY);
-        }
-        window.ClearOffer(window.mDrop);
+        static_cast<WaylandClientSurface*>(data)->ReceiveDrop();
       },
       [](void* data, wl_data_device*, wl_data_offer* offer) {
         auto& window = *static_cast<WaylandClientSurface*>(data);
@@ -478,8 +705,9 @@ struct IGraphicsLinux::WaylandClientSurface
       [](void* data, wl_data_source* source, const char*, int fd) {
         auto& window = *static_cast<WaylandClientSurface*>(data);
         if (source == window.mClipboardSource)
-          SendWaylandText(fd, window.mClipboardText.Get(), window.mClipboardText.GetLength());
-        close(fd);
+          window.QueueClipboardWrite(fd);
+        else
+          close(fd);
       },
       [](void* data, wl_data_source* source) {
         auto& window = *static_cast<WaylandClientSurface*>(data);
@@ -775,8 +1003,8 @@ struct IGraphicsLinux::WaylandClientSurface
     if (graphics.mCloseRequested)
       return;
 
-    const float nextX = wl_fixed_to_double(x) / graphics.GetTotalScale();
-    const float nextY = wl_fixed_to_double(y) / graphics.GetTotalScale();
+    const float nextX = wl_fixed_to_double(x) * mBufferScale / graphics.GetTotalScale();
+    const float nextY = wl_fixed_to_double(y) * mBufferScale / graphics.GetTotalScale();
     const float dx = nextX - graphics.mCursorX;
     const float dy = nextY - graphics.mCursorY;
     graphics.mCursorX = nextX;
@@ -795,6 +1023,10 @@ struct IGraphicsLinux::WaylandClientSurface
 #endif
     if (mPointer) ReleasePointer();
     if (mKeyboard) ReleaseKeyboard();
+    if (mClipboardRead) close(mClipboardRead->fd);
+    if (mDropRead) close(mDropRead->fd);
+    for (const auto& transfer : mClipboardWrites)
+      close(transfer.fd);
     if (mClipboardSource) wl_data_source_destroy(mClipboardSource);
     for (const auto& entry : mOffers)
       wl_data_offer_destroy(entry.first);
@@ -817,14 +1049,16 @@ struct IGraphicsLinux::WaylandClientSurface
         wl_seat_destroy(mSeat);
     }
 #ifdef IPLUG_WAYLAND_TOPLEVEL
+    mOutputs.clear();
+    if (mRegistry) wl_registry_destroy(mRegistry);
     if (mToplevel) xdg_toplevel_destroy(mToplevel);
     if (mXdgSurface) xdg_surface_destroy(mXdgSurface);
     if (mShell) xdg_wm_base_destroy(mShell);
 #endif
     if (mSubsurface) wl_subsurface_destroy(mSubsurface);
     if (mSurface) wl_surface_destroy(mSurface);
-    for (auto* pBuffer : mBuffers)
-      if (pBuffer) wl_buffer_destroy(pBuffer);
+    for (auto& slot : mBuffers)
+      slot.Reset();
     if (mShm) wl_shm_destroy(mShm);
     if (mSubcompositor) wl_subcompositor_destroy(mSubcompositor);
     if (mCompositor) wl_compositor_destroy(mCompositor);
@@ -838,6 +1072,11 @@ void* IGraphicsLinux::OpenWaylandClientWindow()
     return mWaylandClient->mSurface;
   auto window = std::make_unique<WaylandClientSurface>();
   window->mGraphics = this;
+  if (mWaylandClientParent)
+  {
+    const char* hostReads = getenv("IPLUG_VST3_WAYLAND_HOST_READS");
+    window->mHostReadsEvents = hostReads && strcmp(hostReads, "1") == 0;
+  }
   window->mXkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
   if (window->mXkbContext)
   {
@@ -861,11 +1100,15 @@ void* IGraphicsLinux::OpenWaylandClientWindow()
   if (!window->mQueue)
     return nullptr;
 
-  auto* pRegistry = wl_display_get_registry(mWaylandClientDisplay);
+  auto* wrapper = static_cast<wl_display*>(wl_proxy_create_wrapper(mWaylandClientDisplay));
+  if (!wrapper)
+    return nullptr;
+  wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(wrapper), window->mQueue);
+  auto* pRegistry = wl_display_get_registry(wrapper);
+  wl_proxy_wrapper_destroy(wrapper);
   if (!pRegistry)
     return nullptr;
 
-  wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(pRegistry), window->mQueue);
   static const wl_registry_listener registryListener{
     [](void* pData, wl_registry* pRegistry, uint32_t name, const char* interface, uint32_t version) {
       auto& window = *static_cast<WaylandClientSurface*>(pData);
@@ -881,6 +1124,8 @@ void* IGraphicsLinux::OpenWaylandClientWindow()
         window.mDataManager = static_cast<wl_data_device_manager*>(
           wl_registry_bind(pRegistry, name, &wl_data_device_manager_interface, std::min(version, 3u)));
 #ifdef IPLUG_WAYLAND_TOPLEVEL
+      else if (!window.mGraphics->mWaylandClientParent && strcmp(interface, wl_output_interface.name) == 0)
+        window.BindOutput(pRegistry, name, version);
       else if (!window.mShell && strcmp(interface, xdg_wm_base_interface.name) == 0)
       {
         window.mShell = static_cast<xdg_wm_base*>(wl_registry_bind(pRegistry, name, &xdg_wm_base_interface, 1));
@@ -899,11 +1144,20 @@ void* IGraphicsLinux::OpenWaylandClientWindow()
           wl_seat_add_listener(window.mSeat, &seatListener, &window);
       }
     },
-    [](void*, wl_registry*, uint32_t) {}
+    [](void* data, wl_registry*, uint32_t name) {
+#ifdef IPLUG_WAYLAND_TOPLEVEL
+      static_cast<WaylandClientSurface*>(data)->mOutputs.erase(name);
+#endif
+    }
   };
   wl_registry_add_listener(pRegistry, &registryListener, window.get());
   const int result = wl_display_roundtrip_queue(mWaylandClientDisplay, window->mQueue);
-  wl_registry_destroy(pRegistry);
+#ifdef IPLUG_WAYLAND_TOPLEVEL
+  if (!mWaylandClientParent)
+    window->mRegistry = pRegistry;
+  else
+#endif
+    wl_registry_destroy(pRegistry);
   if (result < 0 || !window->mCompositor)
     return nullptr;
   window->CreateDataDevice();
@@ -930,6 +1184,13 @@ void* IGraphicsLinux::OpenWaylandClientWindow()
   else
   {
 #ifdef IPLUG_WAYLAND_TOPLEVEL
+    static const auto outputListener = [] {
+      wl_surface_listener listener{};
+      listener.enter = [](void* data, wl_surface*, wl_output* output) { static_cast<WaylandClientSurface*>(data)->SetOutputEntered(output, true); };
+      listener.leave = [](void* data, wl_surface*, wl_output* output) { static_cast<WaylandClientSurface*>(data)->SetOutputEntered(output, false); };
+      return listener;
+    }();
+    wl_surface_add_listener(window->mSurface, &outputListener, window.get());
     if (!window->CreateToplevel(mWaylandClientTitle.Get(), GetBundleID()))
       return nullptr;
 #else
@@ -937,7 +1198,8 @@ void* IGraphicsLinux::OpenWaylandClientWindow()
 #endif
   }
 #ifdef IPLUG_WAYLAND_EGL
-  if (!window->InitializeEGL(mWaylandClientDisplay, false))
+  // Window EGL can read the Wayland connection internally during a swap.
+  if (window->mHostReadsEvents || !window->InitializeEGL(mWaylandClientDisplay, false))
   {
     window->DestroyEGL();
     // A host's Wayland proxy may only support forwarding shared-memory buffers.
@@ -954,8 +1216,7 @@ void* IGraphicsLinux::OpenWaylandClientWindow()
   {
 #ifdef IPLUG_WAYLAND_EGL
     ScopedGLContext context{this};
-    if (eglGetCurrentContext() != mWaylandClient->mEGLContext ||
-        !gladLoadGLLoader([](const char* name) { return reinterpret_cast<void*>(eglGetProcAddress(name)); }) ||
+    if (!context || !gladLoadGLLoader([](const char* name) { return reinterpret_cast<void*>(eglGetProcAddress(name)); }) ||
         !GLAD_GL_VERSION_3_3)
       return nullptr;
     if (mWaylandClient->mEGLWindow)
@@ -996,7 +1257,7 @@ void* IGraphicsLinux::OpenWaylandClientWindow()
 
   // Submit the initial child frame before the host maps its parent.
   DrawWaylandClientWindow();
-  if (mCloseRequested || !mWaylandClient->mPresented ||
+  if (mCloseRequested || (!mWaylandClient->mPresented && !mNeedsRedraw) ||
       wl_display_roundtrip_queue(mWaylandClientDisplay, mWaylandClient->mQueue) < 0)
     return nullptr;
   return mWaylandClient->mSurface;
@@ -1016,13 +1277,56 @@ bool IGraphicsLinux::ConnectWaylandClient(const char* title)
   return true;
 }
 
+bool IGraphicsLinux::SetWaylandClientVisible(bool visible)
+{
+  if (!mWaylandClient || (!mWaylandClient->mToplevel && !mWaylandClient->mNeedsRemap) || mCloseRequested)
+    return false;
+  auto& window = *mWaylandClient;
+  if (visible == !window.mHidden)
+    return true;
+  window.mHidden = !visible;
+  if (!visible && window.mPresented)
+  {
+    wl_surface_attach(window.mSurface, nullptr, 0, 0);
+    wl_surface_commit(window.mSurface);
+    xdg_toplevel_destroy(window.mToplevel);
+    window.mToplevel = nullptr;
+    xdg_surface_destroy(window.mXdgSurface);
+    window.mXdgSurface = nullptr;
+    window.mPresented = window.mConfigured = false;
+    window.mNeedsRemap = true;
+  }
+  if (visible && !window.mNeedsRemap)
+    xdg_toplevel_set_title(window.mToplevel, mWaylandClientTitle.Get());
+  if (visible && window.mNeedsRemap)
+  {
+    if (!window.CreateToplevel(mWaylandClientTitle.Get(), GetBundleID()))
+    {
+      if (window.mXdgSurface)
+        xdg_surface_destroy(window.mXdgSurface);
+      window.mXdgSurface = nullptr;
+      window.mHidden = true;
+      return false;
+    }
+    wl_surface_commit(window.mSurface);
+    window.mNeedsRemap = false;
+    mNeedsRedraw = true;
+  }
+  if (wl_display_flush(mWaylandClientDisplay) < 0 && errno != EAGAIN)
+  {
+    RequestWindowClose();
+    return false;
+  }
+  return true;
+}
+
 void IGraphicsLinux::SetWaylandClientTitle(const char* title)
 {
   mWaylandClientTitle.Set(title);
-  if (mWaylandClient && mWaylandClient->mToplevel)
+  if (mWaylandClient && mWaylandClient->mToplevel && !mWaylandClient->mHidden)
   {
     xdg_toplevel_set_title(mWaylandClient->mToplevel, title);
-    wl_surface_commit(mWaylandClient->mSurface);
+    wl_display_flush(mWaylandClientDisplay);
   }
 }
 #endif
@@ -1050,6 +1354,11 @@ bool IGraphicsLinux::ReadWaylandClientClipboard(WDL_String& text)
   return true;
 }
 
+void IGraphicsLinux::RequestWaylandClientClipboard(std::function<void(const char*)> onText)
+{
+  mWaylandClient->RequestClipboard(std::move(onText));
+}
+
 bool IGraphicsLinux::WriteWaylandClientClipboard(const char* text)
 {
   return mWaylandClient->SetClipboard(text ? text : "");
@@ -1063,8 +1372,11 @@ void IGraphicsLinux::CloseWaylandClientWindow()
     {
 #ifdef IPLUG_WAYLAND_EGL
       ScopedGLContext context{this};
+      if (!context)
+        OnViewContextLost();
+      else
 #endif
-      OnViewDestroyed();
+        OnViewDestroyed();
     }
     delete mWaylandClient;
     mWaylandClient = nullptr;
@@ -1082,34 +1394,36 @@ void IGraphicsLinux::DrawWaylandClientWindow()
 {
   auto* pDisplay = mWaylandClientDisplay;
   auto* pQueue = mWaylandClient->mQueue;
-  while (wl_display_prepare_read_queue(pDisplay, pQueue) != 0)
-  {
-    if (wl_display_dispatch_queue_pending(pDisplay, pQueue) < 0)
-    {
-      RequestWindowClose();
-      return;
-    }
-  }
-
   const int flushed = wl_display_flush(pDisplay);
   if (flushed < 0 && errno != EAGAIN)
   {
-    wl_display_cancel_read(pDisplay);
     RequestWindowClose();
     return;
   }
 
-  pollfd fd{wl_display_get_fd(pDisplay), POLLIN, 0};
-  if (poll(&fd, 1, 0) > 0 && (fd.revents & (POLLIN | POLLERR | POLLHUP)))
+  if (!mWaylandClient->mHostReadsEvents)
   {
-    if (wl_display_read_events(pDisplay) < 0)
+    while (wl_display_prepare_read_queue(pDisplay, pQueue) != 0)
     {
-      RequestWindowClose();
-      return;
+      if (wl_display_dispatch_queue_pending(pDisplay, pQueue) < 0)
+      {
+        RequestWindowClose();
+        return;
+      }
     }
+
+    pollfd fd{wl_display_get_fd(pDisplay), POLLIN, 0};
+    if (poll(&fd, 1, 0) > 0 && (fd.revents & (POLLIN | POLLERR | POLLHUP)))
+    {
+      if (wl_display_read_events(pDisplay) < 0)
+      {
+        RequestWindowClose();
+        return;
+      }
+    }
+    else
+      wl_display_cancel_read(pDisplay);
   }
-  else
-    wl_display_cancel_read(pDisplay);
 
   if (wl_display_dispatch_queue_pending(pDisplay, pQueue) < 0)
   {
@@ -1117,13 +1431,34 @@ void IGraphicsLinux::DrawWaylandClientWindow()
     return;
   }
 
-  mWaylandClient->RepeatKey();
+  mWaylandClient->PumpClipboardTransfers();
+  if (!mCloseRequested)
+    mWaylandClient->RepeatKey();
   if (mCloseRequested)
     return;
 #ifdef IPLUG_WAYLAND_TOPLEVEL
-  if (mWaylandClient->mToplevel && !mWaylandClient->mConfigured)
-    return;
+  if (mWaylandClient->mToplevel)
+  {
+    if (mWaylandClient->mHidden || !mWaylandClient->mConfigured)
+      return;
+    mWaylandClient->UpdateBufferScale();
+  }
 #endif
+
+  if (mWaylandClientParent && wl_surface_get_version(mWaylandClient->mSurface) >= WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION)
+  {
+    // A VST3 host supplies its own content scale. Its view rectangle is in
+    // physical pixels, while pointer and drop locations are surface-local.
+    const float hostScale = GetScreenScale();
+    const int scale = hostScale >= 1.f && hostScale <= 8192.f && hostScale == std::floor(hostScale)
+      ? static_cast<int>(hostScale) : 1;
+    if (scale != mWaylandClient->mBufferScale)
+    {
+      wl_surface_set_buffer_scale(mWaylandClient->mSurface, scale);
+      mWaylandClient->mBufferScale = scale;
+      mNeedsRedraw = true;
+    }
+  }
 
   IRECTList dirty;
   if (IsDirty(dirty))
@@ -1133,7 +1468,7 @@ void IGraphicsLinux::DrawWaylandClientWindow()
     return;
   auto& window = *mWaylandClient;
 #ifdef IPLUG_WAYLAND_EGL
-  if (!window.mEGLWindow && window.mBuffers[0] && window.mBuffers[1])
+  if (!window.mEGLWindow && window.mBuffers[0].busy && window.mBuffers[1].busy)
     return;
   if (!window.ResizeEGL(WindowWidth() * GetScreenScale(), WindowHeight() * GetScreenScale()))
   {
@@ -1141,13 +1476,13 @@ void IGraphicsLinux::DrawWaylandClientWindow()
     return;
   }
   ScopedGLContext context{this};
-  if (eglGetCurrentContext() != window.mEGLContext || !GetDrawContext())
+  if (!context || !GetDrawContext())
   {
     RequestWindowClose();
     return;
   }
 #else
-  if (window.mBuffers[0] && window.mBuffers[1])
+  if (window.mBuffers[0].busy && window.mBuffers[1].busy)
     return;
 #endif
   dirty.Clear();
@@ -1181,6 +1516,8 @@ void IGraphicsLinux::DrawWaylandClientWindow()
       window.mEGLWindowResized = false;
     }
   }
+  else if (!window.mEGLWindow)
+    mNeedsRedraw = true;
   else
   {
     fprintf(stderr, "Could not present a Wayland EGL frame\n");
@@ -1190,6 +1527,12 @@ void IGraphicsLinux::DrawWaylandClientWindow()
 }
 
 #ifdef IPLUG_WAYLAND_EGL
+bool IGraphicsLinux::IsGLContextActive() const
+{
+  return !mWaylandClient || (mWaylandClient->mEGLContext != EGL_NO_CONTEXT &&
+                            eglGetCurrentContext() == mWaylandClient->mEGLContext);
+}
+
 void IGraphicsLinux::ActivateWaylandClientGL()
 {
   auto& window = *mWaylandClient;
@@ -1200,9 +1543,8 @@ void IGraphicsLinux::ActivateWaylandClientGL()
   });
   if (state.context == window.mEGLContext)
     return;
-  if (state.glxContext)
-    glXMakeContextCurrent(state.glxDisplay, 0, 0, nullptr);
-  if (!eglBindAPI(EGL_OPENGL_API) ||
+  if ((state.glxContext && !glXMakeContextCurrent(state.glxDisplay, 0, 0, nullptr)) ||
+      !eglBindAPI(EGL_OPENGL_API) ||
       !eglMakeCurrent(window.mEGLDisplay, window.mEGLSurface, window.mEGLSurface, window.mEGLContext))
     fprintf(stderr, "Could not activate the Wayland EGL context\n");
 }
@@ -1231,43 +1573,42 @@ void IGraphicsLinux::DeactivateWaylandClientGL()
 template <typename ReadPixels>
 bool IGraphicsLinux::WaylandClientSurface::PresentShmFrame(int width, int height, ReadPixels readPixels)
 {
-  auto& pBuffer = mBuffers[mBuffers[0] ? 1 : 0];
-  if (pBuffer || width <= 0 || height <= 0 || width > 8192 || height > 8192)
+  auto& slot = mBuffers[mBuffers[0].busy ? 1 : 0];
+  if (slot.busy || width <= 0 || height <= 0 || width > 8192 || height > 8192)
     return false;
 
   const int stride = width * 4;
   const int size = stride * height;
-  const int fd = memfd_create("iplug2-wayland-editor", MFD_CLOEXEC);
-  if (fd < 0)
-    return false;
-  void* pData = MAP_FAILED;
-  if (ftruncate(fd, size) == 0)
-    pData = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-
-  if (pData != MAP_FAILED)
+  if (!slot.buffer || slot.width != width || slot.height != height)
   {
-    if (readPixels(pData, stride))
+    slot.Reset();
+    const int fd = memfd_create("iplug2-wayland-editor", MFD_CLOEXEC);
+    if (fd < 0)
+      return false;
+    slot.width = width;
+    slot.height = height;
+    if (ftruncate(fd, size) == 0)
+      slot.pixels = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (slot.pixels != MAP_FAILED)
     {
-      if (auto* pPool = wl_shm_create_pool(mShm, fd, size))
+      if (auto* pool = wl_shm_create_pool(mShm, fd, size))
       {
-        pBuffer = wl_shm_pool_create_buffer(pPool, 0, width, height, stride, WL_SHM_FORMAT_ARGB8888);
-        wl_shm_pool_destroy(pPool);
+        slot.buffer = wl_shm_pool_create_buffer(pool, 0, width, height, stride, WL_SHM_FORMAT_ARGB8888);
+        wl_shm_pool_destroy(pool);
       }
     }
-    munmap(pData, size);
+    close(fd);
+    if (!slot.buffer)
+      return false;
+    static const wl_buffer_listener listener{
+      [](void* data, wl_buffer*) { static_cast<FrameBuffer*>(data)->busy = false; }
+    };
+    wl_buffer_add_listener(slot.buffer, &listener, &slot);
   }
-  close(fd);
-  if (!pBuffer)
+  if (!readPixels(slot.pixels, stride))
     return false;
-
-  static const wl_buffer_listener bufferListener{
-    [](void* pSlot, wl_buffer* pReleased) {
-      wl_buffer_destroy(pReleased);
-      *static_cast<wl_buffer**>(pSlot) = nullptr;
-    }
-  };
-  wl_buffer_add_listener(pBuffer, &bufferListener, &pBuffer);
-  wl_surface_attach(mSurface, pBuffer, 0, 0);
+  slot.busy = true;
+  wl_surface_attach(mSurface, slot.buffer, 0, 0);
   wl_surface_damage(mSurface, 0, 0, width, height);
   wl_surface_commit(mSurface);
   wl_display_flush(mGraphics->mWaylandClientDisplay);
@@ -1291,6 +1632,8 @@ void IGraphicsLinux::PresentWaylandClientFrame(const SkPixmap& pixels)
 #endif
   }))
     window.mPresented = true;
+  else
+    mNeedsRedraw = true;
 }
 #endif
 

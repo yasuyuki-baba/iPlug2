@@ -111,6 +111,11 @@ int main(int argc, char** argv)
     {
       Require(gui->show(plugin) && state.mTimer != CLAP_INVALID_ID, "could not show floating editor");
       Require(gui->show(plugin), "could not show an already visible editor");
+      if (cycle == 0 && !interactive)
+      {
+        Require(gui->hide(plugin) && gui->hide(plugin), "hide before the first frame failed");
+        Require(state.mTimer == CLAP_INVALID_ID && gui->show(plugin), "show before the first frame failed");
+      }
       for (int frame = 0; frame < (interactive ? 6000 : 35) && !state.mGuiClosed; ++frame)
       {
         if (state.mCallbackRequested.exchange(false))

@@ -160,10 +160,12 @@ public:
 
 #if defined IPLUG_WAYLAND_TOPLEVEL && !defined NO_IGRAPHICS
   bool ConnectWaylandClient(const char* title);
+  bool SetWaylandClientVisible(bool visible);
   void SetWaylandClientTitle(const char* title);
 #endif
 
   bool GetTextFromClipboard(WDL_String& str) override;
+  void RequestClipboardText(std::function<void(const char*)> onText) override;
   bool SetTextInClipboard(const char* str) override;
 
 protected:
@@ -201,10 +203,12 @@ private:
   void CloseWaylandClientWindow();
   void DrawWaylandClientWindow();
   bool ReadWaylandClientClipboard(WDL_String& text);
+  void RequestWaylandClientClipboard(std::function<void(const char*)> onText);
   bool WriteWaylandClientClipboard(const char* text);
 #ifdef IPLUG_WAYLAND_EGL
   void ActivateWaylandClientGL();
   void DeactivateWaylandClientGL();
+  bool IsGLContextActive() const override;
 #else
   void PresentWaylandClientFrame(const SkPixmap& pixels);
 #endif

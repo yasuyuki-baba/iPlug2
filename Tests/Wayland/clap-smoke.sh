@@ -33,7 +33,7 @@ if [[ $weston_help == *--renderer* ]]; then
   pixman=(--renderer=pixman)
 fi
 weston --no-config --backend=headless-backend.so "${pixman[@]}" \
-  --socket="$WAYLAND_DISPLAY" --log="$runtime/weston.log" &
+  --scale=2 --width=1600 --height=1600 --socket="$WAYLAND_DISPLAY" --log="$runtime/weston.log" &
 weston_pid=$!
 for ((attempt = 0; attempt < 50; ++attempt)); do
   [[ ! -S $runtime/$WAYLAND_DISPLAY ]] || break
@@ -47,6 +47,9 @@ fi
 if ! WAYLAND_DEBUG=client timeout 20s "$runtime/clap-lifecycle" "$1" >"$runtime/client.log" 2>&1 ||
    [[ $(grep -Ec 'xdg_surface[@#][0-9]+\.get_toplevel' "$runtime/client.log") != 3 ]] ||
    [[ $(grep -Ec 'xdg_toplevel[@#][0-9]+\.destroy\(' "$runtime/client.log") != 3 ]] ||
+   [[ $(grep -Ec 'wl_compositor[@#][0-9]+\.create_surface' "$runtime/client.log") != 1 ]] ||
+   ! grep -Eq 'wl_surface[@#][0-9]+\.set_buffer_scale\(2\)' "$runtime/client.log" ||
+   [[ $(grep -Ec 'wl_surface[@#][0-9]+\.attach\(nil' "$runtime/client.log") -lt 3 ]] ||
    [[ $(grep -Ec 'wl_surface[@#][0-9]+\.attach\(wl_buffer[@#]' "$runtime/client.log") -lt 3 ]]; then
   tail -100 "$runtime/client.log" >&2
   exit 1

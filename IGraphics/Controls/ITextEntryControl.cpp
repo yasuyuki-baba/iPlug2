@@ -340,14 +340,13 @@ void ITextEntryControl::CopySelection()
 
 void ITextEntryControl::Paste()
 {
-  WDL_String fromClipboard;
-  if (GetUI()->GetTextFromClipboard(fromClipboard))
-  {
-    CallSTB([&] {
-      auto uText = UTF8ToUTF16String(fromClipboard.Get());
-      stb_textedit_paste (this, &mEditState, uText.data(), (int) uText.size());
-    });
-  }
+  GetUI()->RequestClipboardText([this, session = std::weak_ptr<int>(mEditSession)](const char* text) {
+    if (!session.expired())
+      CallSTB([&] {
+        auto uText = UTF8ToUTF16String(text);
+        stb_textedit_paste(this, &mEditState, uText.data(), static_cast<int>(uText.size()));
+      });
+  });
 }
 
 void ITextEntryControl::Cut()
@@ -517,6 +516,7 @@ float ITextEntryControl::MeasureCharWidth(char16_t c, char16_t nc)
 
 void ITextEntryControl::CreateTextEntry(int paramIdx, const IText& text, const IRECT& bounds, int length, const char* str)
 {
+  mEditSession = std::make_shared<int>();
   SetTargetAndDrawRECTs(bounds);
   SetText(text);
   mText.mFGColor = mText.mTextEntryFGColor;
@@ -530,6 +530,7 @@ void ITextEntryControl::CreateTextEntry(int paramIdx, const IText& text, const I
 
 void ITextEntryControl::DismissEdit()
 {
+  mEditSession.reset();
   mEditing = false;
   SetTargetAndDrawRECTs(IRECT());
   GetUI()->ClearInTextEntryControl();
@@ -538,6 +539,7 @@ void ITextEntryControl::DismissEdit()
 
 void ITextEntryControl::CommitEdit()
 {
+  mEditSession.reset();
   mEditing = false;
   GetUI()->SetControlValueAfterTextEdit(UTF16ToUTF8String(mEditString).c_str());
   SetTargetAndDrawRECTs(IRECT());

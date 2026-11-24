@@ -1,14 +1,19 @@
 // Exercise attach, timer dispatch and detach against a real Wayland connection.
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/gui/iplugview.h"
+#include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
 #include "pluginterfaces/gui/iwaylandframe.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include <wayland-client.h>
 #include <dlfcn.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <poll.h>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <vector>
 
 using namespace Steinberg;
@@ -81,7 +86,10 @@ public:
 
 int main(int argc, char** argv)
 {
-  Require(argc == 2, "expected a VST3 module .so path");
+  Require(argc == 2 || (argc == 3 && (strcmp(argv[2], "--concurrent") == 0 || strcmp(argv[2], "--host-reads") == 0)),
+          "expected a VST3 module .so path [--concurrent]");
+  const bool concurrent = argc == 3 && strcmp(argv[2], "--concurrent") == 0;
+  const bool hostReads = argc == 3 && strcmp(argv[2], "--host-reads") == 0;
   Host host;
   host.mDisplay = wl_display_connect(nullptr);
   Require(host.mDisplay != nullptr, "could not connect to Weston");
@@ -118,23 +126,69 @@ int main(int argc, char** argv)
   Require(controller != nullptr, "missing edit controller");
   const auto idleTimers = host.mTimers.size();
 
+  std::atomic<bool> stop{false};
+  std::thread hostReader;
+  if (concurrent)
+  {
+    hostReader = std::thread([&] {
+      auto* queue = wl_display_create_queue(host.mDisplay);
+      Require(queue != nullptr, "could not create the concurrent host queue");
+      while (!stop)
+      {
+        Require(wl_display_roundtrip_queue(host.mDisplay, queue) >= 0 &&
+                wl_display_dispatch_pending(host.mDisplay) >= 0, "concurrent host dispatch failed");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      wl_event_queue_destroy(queue);
+    });
+  }
+
   // The SDK's editorhost covers visible mapping and input. Here the parent
   // stays unmapped so we can exercise attachment and teardown repeatedly.
-  for (unsigned cycle = 0; cycle < 3; ++cycle)
+  const unsigned cycles = concurrent ? 50 : 3;
+  for (unsigned cycle = 0; cycle < cycles; ++cycle)
   {
     auto view = owned(controller->createView("editor"));
     Require(view && view->isPlatformTypeSupported(kPlatformTypeWaylandSurfaceID) == kResultTrue,
             "Wayland editor platform not advertised");
+    if (!concurrent)
+    {
+      FUnknownPtr<IPlugViewContentScaleSupport> scale(view);
+      Require(scale && scale->setContentScaleFactor(cycle == 1 ? 2.f : 1.f) == kResultOk, "host scale rejected");
+    }
     Require(view->setFrame(&host) == kResultOk &&
             view->attached(parent, kPlatformTypeWaylandSurfaceID) == kResultOk &&
             host.mBorrowed && host.mTimers.size() == idleTimers + 1, "editor attachment failed");
+    // Leave a readable fd and a prepared host reader until both timer dispatch
+    // and removal return. A second read from the UI thread would deadlock.
+    wl_event_queue* heldQueue = nullptr;
+    wl_callback* reply = nullptr;
+    if (hostReads)
+    {
+      heldQueue = wl_display_create_queue(host.mDisplay);
+      Require(heldQueue && wl_display_prepare_read_queue(host.mDisplay, heldQueue) == 0, "host prepare failed");
+      reply = wl_display_sync(host.mDisplay);
+      Require(reply && wl_display_flush(host.mDisplay) >= 0, "host sync failed");
+      pollfd fd{wl_display_get_fd(host.mDisplay), POLLIN, 0};
+      Require(poll(&fd, 1, 1000) == 1, "expected a readable connection");
+    }
     for (auto* timer : host.mTimers)
       timer->onTimer();
     Require(view->removed() == kResultOk && !host.mBorrowed && host.mTimers.size() == idleTimers,
             "editor did not return its connection and timer");
+    if (hostReads)
+    {
+      Require(wl_display_read_events(host.mDisplay) >= 0, "host read failed");
+      wl_callback_destroy(reply);
+      wl_event_queue_destroy(heldQueue);
+    }
     view->setFrame(nullptr);
     Require(wl_display_roundtrip(host.mDisplay) >= 0, "Wayland error after editor removal");
   }
+
+  stop = true;
+  if (hostReader.joinable())
+    hostReader.join();
 
   controller = nullptr;
   Require(component->terminate() == kResultOk && host.mTimers.empty(), "host timer leaked");
@@ -147,5 +201,6 @@ int main(int argc, char** argv)
   wl_compositor_destroy(compositor);
   wl_registry_destroy(registry);
   wl_display_disconnect(host.mDisplay);
-  std::puts("VST3 Wayland smoke test: three attach/dispatch/remove cycles passed");
+  std::printf("VST3 Wayland smoke test: %u attach/dispatch/remove cycles passed%s\n",
+              cycles, concurrent ? " with a concurrent host reader" : "");
 }

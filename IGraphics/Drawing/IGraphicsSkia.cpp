@@ -475,6 +475,8 @@ void IGraphicsSkia::OnViewDestroyed()
 void IGraphicsSkia::DrawResize()
 {
   ScopedGLContext scopedGLContext{this};
+  if (!scopedGLContext)
+    return;
   auto w = static_cast<int>(std::ceil(static_cast<float>(WindowWidth()) * GetScreenScale()));
   auto h = static_cast<int>(std::ceil(static_cast<float>(WindowHeight()) * GetScreenScale()));
   
@@ -511,6 +513,15 @@ void IGraphicsSkia::DrawResize()
   if (mCanvas)
     mCanvas->save();
 }
+
+#ifdef IPLUG_WAYLAND_EGL
+void IGraphicsSkia::OnViewContextLost()
+{
+  if (mGrContext)
+    mGrContext->abandonContext();
+  OnViewDestroyed();
+}
+#endif
 
 void IGraphicsSkia::BeginFrame()
 {

@@ -2019,6 +2019,18 @@ bool IGraphicsLinux::GetTextFromClipboard(WDL_String& str)
   return false;
 }
 
+void IGraphicsLinux::RequestClipboardText(std::function<void(const char*)> onText)
+{
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  if (mWaylandClient)
+  {
+    RequestWaylandClientClipboard(std::move(onText));
+    return;
+  }
+#endif
+  IGraphics::RequestClipboardText(std::move(onText));
+}
+
 bool IGraphicsLinux::SetTextInClipboard(const char* str)
 {
 #if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS

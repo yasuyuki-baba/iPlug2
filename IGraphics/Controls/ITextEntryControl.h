@@ -88,6 +88,7 @@ private:
   STB_TexteditState mEditState;
   WDL_TypedBuf<float> mCharWidths;
   std::u16string mEditString;
+  std::shared_ptr<int> mEditSession;
 };
 
 END_IGRAPHICS_NAMESPACE
