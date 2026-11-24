@@ -89,7 +89,9 @@ editor. To test without a DAW, the smoke test loads the actual module in a
 small CLAP host, checks repeated show/hide and destruction, and verifies
 that the editor keeps dispatching events without submitting frames while hidden.
 It also verifies the host's close notification when the connection is lost
-while the editor is hidden.
+while the editor is hidden. It runs these checks with a host timer, with the
+timer extension omitted, and with timer registration rejected. In the latter
+two cases the host services the plug-in's main-thread callback requests.
 
 The floating editor uses the highest integer scale of the outputs it occupies.
 The smoke test checks a 2× output and reuses the editor and its Wayland surface
@@ -105,6 +107,28 @@ for a selection owner. File drops use nonblocking transfers and retain the
 drop coordinates until the URI list arrives. File, directory, color and text-entry dialogs use
 GTK 3 on Wayland. The GTK text-entry dialog provides the desktop IME;
 the raw surface's key callbacks deliver XKB text and Compose.
+
+### Clipboard transfer while the CLAP editor is hidden
+
+This integration test uses a local Weston RDP session to send a copy keypress
+and a separate Wayland client to read the clipboard. Install Weston with its RDP
+backend, FreeRDP, Xvfb, Xdotool, ImageMagick, OpenSSL, Python 3 and `wl-clipboard`.
+The script uses `wayland-info` or `weston-info` to wait for the input seat.
+Set `FREERDP=xfreerdp3` if the client executable has that name.
+
+```sh
+cmake -S Tests/Wayland/Clipboard -B build/wayland-clipboard -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DIGRAPHICS_BACKEND=NANOVG -DIGRAPHICS_RENDERER=GL3 \
+  -DIPLUG_CLAP_WAYLAND=ON -DIPLUG_DEPLOY_PLUGINS=OFF
+cmake --build build/wayland-clipboard --target WaylandClipboardTest-clap
+LIBGL_ALWAYS_SOFTWARE=1 bash Tests/Wayland/clap-clipboard.sh \
+  build/wayland-clipboard/out/WaylandClipboardTest.clap Dependencies/IPlug/CLAP_SDK
+```
+
+The test compares all 256 KiB after hide, verifies that closing a receiver
+releases the write pipe, and destroys the GUI while a second receiver is still
+blocked. It checks that the pipe closes while the host process is still
+running. All cases run with an accepted, unavailable and rejected host timer.
 
 ## NanoVG/GL3 and Skia/GL3 with EGL
 
