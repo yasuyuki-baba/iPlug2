@@ -29,11 +29,201 @@ extern "C" bool SaveWindowScreenshot(void* hwnd, const char* path);
 #include <unistd.h>
 #include <sys/wait.h>
 #include <cerrno>
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && !defined NO_IGRAPHICS
+#include <gtk/gtk.h>
+#endif
 #define GET_MENU() GetMenu(gHWND)
 static bool SaveWindowScreenshot(HWND, const char*) { return false; }
 #endif
 
 using namespace iplug;
+
+#if defined OS_LINUX && defined IPLUG_EXPERIMENTAL_WAYLAND && !defined NO_IGRAPHICS
+void IPlugAPPHost::ShowWaylandPreferences(void* parent)
+{
+  if (!gtk_init_check(nullptr, nullptr))
+    return;
+  GtkWidget* dialog = gtk_dialog_new_with_buttons("Audio and MIDI Settings", static_cast<GtkWindow*>(parent),
+    GTK_DIALOG_MODAL, "_Cancel", GTK_RESPONSE_CANCEL, "_OK", GTK_RESPONSE_OK, nullptr);
+  auto* content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+  if (mNoIO)
+  {
+    gtk_box_pack_start(GTK_BOX(content), gtk_label_new("Audio and MIDI are disabled by --no-io."), FALSE, FALSE, 12);
+    gtk_dialog_set_response_sensitive(GTK_DIALOG(dialog), GTK_RESPONSE_OK, FALSE);
+    gtk_widget_show_all(dialog);
+    gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    return;
+  }
+
+  auto* grid = GTK_GRID(gtk_grid_new());
+  gtk_container_set_border_width(GTK_CONTAINER(grid), 16);
+  gtk_grid_set_row_spacing(grid, 8);
+  gtk_grid_set_column_spacing(grid, 12);
+  gtk_box_pack_start(GTK_BOX(content), GTK_WIDGET(grid), TRUE, TRUE, 0);
+  int row = 0;
+  const auto addCombo = [&](const char* label) {
+    auto* combo = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    auto* caption = gtk_label_new_with_mnemonic(label);
+    gtk_label_set_mnemonic_widget(GTK_LABEL(caption), GTK_WIDGET(combo));
+    gtk_widget_set_halign(caption, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(GTK_WIDGET(combo), TRUE);
+    gtk_grid_attach(grid, caption, 0, row, 1, 1);
+    gtk_grid_attach(grid, GTK_WIDGET(combo), 1, row++, 1, 1);
+    return combo;
+  };
+  auto* driver = addCombo("Audio _driver");
+  auto* input = addCombo("Audio _input");
+  auto* output = addCombo("Audio _output");
+  auto* rate = addCombo("Sample _rate");
+  auto* buffer = addCombo("Buffer _size");
+  auto* midiInput = addCombo("_MIDI input");
+  auto* midiOutput = addCombo("MIDI o_utput");
+  auto* status = gtk_label_new(nullptr);
+  gtk_label_set_line_wrap(GTK_LABEL(status), TRUE);
+  gtk_grid_attach(grid, status, 0, row, 2, 1);
+
+  const auto select = [](GtkComboBoxText* combo, const char* value) {
+    if (!gtk_combo_box_set_active_id(GTK_COMBO_BOX(combo), value))
+      gtk_combo_box_set_active(GTK_COMBO_BOX(combo), 0);
+  };
+  const auto selectNumber = [&select](GtkComboBoxText* combo, uint32_t number) {
+    select(combo, std::to_string(number).c_str());
+  };
+  const auto active = [](GtkComboBoxText* combo) {
+    const char* id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo));
+    return id ? id : "";
+  };
+  const auto append = [](GtkComboBoxText* combo, const char* value) {
+    gtk_combo_box_text_append(combo, value, value);
+  };
+  gtk_combo_box_text_append(driver, "0", "ALSA");
+  std::vector<RtAudio::Api> apis;
+  RtAudio::getCompiledApi(apis);
+  if (std::find(apis.begin(), apis.end(), RtAudio::UNIX_JACK) != apis.end())
+    gtk_combo_box_text_append(driver, "1", "JACK");
+  selectNumber(driver, mState.mAudioDriverType);
+  for (const auto& size : kBufferSizeOptions)
+    append(buffer, size.c_str());
+  selectNumber(buffer, mState.mBufferSize);
+
+  for (auto* combo : {midiInput, midiOutput})
+  {
+    const auto& devices = combo == midiInput ? mMidiInputDevNames : mMidiOutputDevNames;
+    for (const auto& device : devices)
+      append(combo, device.c_str());
+    if (devices.empty())
+      append(combo, OFF_TEXT);
+    select(combo, combo == midiInput ? mState.mMidiInDev.Get() : mState.mMidiOutDev.Get());
+    gtk_widget_set_sensitive(GTK_WIDGET(combo), !devices.empty());
+  }
+
+  std::vector<RtAudio::DeviceInfo> audioDevices;
+  std::function<void()> populateRates = [&] {
+    const std::string selectedRate = active(rate);
+    gtk_combo_box_text_remove_all(rate);
+    if (!*active(input) || !*active(output))
+      return;
+    const auto findDevice = [&](const char* name, bool isInput) {
+      return std::find_if(audioDevices.begin(), audioDevices.end(), [&](const RtAudio::DeviceInfo& device) {
+        return device.name == name && (isInput ? device.inputChannels : device.outputChannels);
+      });
+    };
+    const auto in = findDevice(active(input), true);
+    const auto out = findDevice(active(output), false);
+    if (in == audioDevices.end() || out == audioDevices.end())
+      return;
+    for (uint32_t sampleRate : in->sampleRates)
+      if (std::find(out->sampleRates.begin(), out->sampleRates.end(), sampleRate) != out->sampleRates.end())
+        append(rate, std::to_string(sampleRate).c_str());
+    select(rate, selectedRate.empty() ? std::to_string(mState.mAudioSR).c_str() : selectedRate.c_str());
+  };
+
+  std::function<void()> populateDevices = [&] {
+    audioDevices.clear();
+    RtAudio probe(active(driver)[0] == '1' ? RtAudio::UNIX_JACK : RtAudio::LINUX_ALSA);
+    for (auto id : probe.getDeviceIds())
+      audioDevices.push_back(probe.getDeviceInfo(id));
+    gtk_combo_box_text_remove_all(input);
+    gtk_combo_box_text_remove_all(output);
+    for (const auto& device : audioDevices)
+    {
+      if (device.inputChannels)
+        append(input, device.name.c_str());
+      if (device.outputChannels)
+        append(output, device.name.c_str());
+    }
+    select(input, mState.mAudioInDev.Get());
+    select(output, mState.mAudioOutDev.Get());
+    populateRates();
+  };
+  populateDevices();
+  auto onChanged = +[](GtkComboBox*, gpointer data) { (*static_cast<std::function<void()>*>(data))(); };
+  g_signal_connect(driver, "changed", G_CALLBACK(onChanged), &populateDevices);
+  g_signal_connect(input, "changed", G_CALLBACK(onChanged), &populateRates);
+  g_signal_connect(output, "changed", G_CALLBACK(onChanged), &populateRates);
+  gtk_widget_show_all(dialog);
+
+  while (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_OK)
+  {
+    const AppState previous(mState);
+    AppState next(previous);
+    next.mAudioDriverType = active(driver)[0] == '1' ? kDeviceJack : kDeviceAlsa;
+    const bool changeDriver = next.mAudioDriverType != previous.mAudioDriverType;
+    if (changeDriver || (*active(input) && *active(output)))
+    {
+      next.mAudioInDev.Set(active(input));
+      next.mAudioOutDev.Set(active(output));
+      next.mAudioSR = std::strtoul(active(rate), nullptr, 10);
+    }
+    next.mBufferSize = std::strtoul(active(buffer), nullptr, 10);
+    const bool changeAudio = !AudioSettingsInStateAreEqual(previous, next);
+    if (changeAudio && (!next.mAudioInDev.GetLength() || !next.mAudioOutDev.GetLength() || !next.mAudioSR))
+    {
+      gtk_label_set_text(GTK_LABEL(status), "Select an input, output and sample rate.");
+      continue;
+    }
+
+    mState = next;
+    if (changeDriver)
+    {
+      TryToChangeAudioDriverType();
+      ProbeAudioIO();
+    }
+    if (changeAudio && !TryToChangeAudio(false))
+    {
+      mState = previous;
+      if (changeDriver)
+      {
+        TryToChangeAudioDriverType();
+        ProbeAudioIO();
+      }
+      TryToChangeAudio(false);
+      UpdateINI();
+      gtk_label_set_text(GTK_LABEL(status), "Could not start audio with these settings.");
+      continue;
+    }
+
+    if (mMidiIn && strcmp(active(midiInput), previous.mMidiInDev.Get()) != 0)
+    {
+      mState.mMidiInDev.Set(active(midiInput));
+      SelectMIDIDevice(ERoute::kInput, mState.mMidiInDev.Get());
+    }
+    if (mMidiOut && strcmp(active(midiOutput), previous.mMidiOutDev.Get()) != 0)
+    {
+      mState.mMidiOutDev.Set(active(midiOutput));
+      SelectMIDIDevice(ERoute::kOutput, mState.mMidiOutDev.Get());
+    }
+    UpdateINI();
+    break;
+  }
+
+  g_signal_handlers_disconnect_by_data(driver, &populateDevices);
+  g_signal_handlers_disconnect_by_data(input, &populateRates);
+  g_signal_handlers_disconnect_by_data(output, &populateRates);
+  gtk_widget_destroy(dialog);
+}
+#endif
 
 #if !defined NO_IGRAPHICS
 #include "IGraphics.h"

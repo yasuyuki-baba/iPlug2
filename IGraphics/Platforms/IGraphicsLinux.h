@@ -64,6 +64,16 @@
 #include "IPlugTimer.h"
 #include "IGraphics_select.h"
 
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+typedef struct _GtkWidget GtkWidget;
+typedef struct _cairo cairo_t;
+#endif
+
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+struct wl_display;
+struct wl_surface;
+#endif
+
 BEGIN_IPLUG_NAMESPACE
 BEGIN_IGRAPHICS_NAMESPACE
 
@@ -122,7 +132,7 @@ public:
 
   void* OpenWindow(void* pParent) override;
   void CloseWindow() override;
-  bool WindowIsOpen() override { return mPlugWnd != 0; }
+  bool WindowIsOpen() override { return GetWindow() != nullptr; }
 
   void UpdateTooltips() override;
 
@@ -133,11 +143,29 @@ public:
 
   bool OpenURL(const char* url, const char* msgWindowTitle, const char* confirmMsg, const char* errMsgOnFailure) override;
 
-  void* GetWindow() override { return (void*)(uintptr_t)mPlugWnd; }
+  void* GetWindow() override;
+  const char* GetPlatformAPIStr() override;
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  void SetWaylandWindow(GtkWidget* pWindow) { mWaylandWindow = pWindow; }
+#endif
 
-  const char* GetPlatformAPIStr() override { return "x11"; }
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  void SetWaylandClientParent(wl_display* pDisplay, wl_surface* pParent, std::function<void(wl_display*)> closeConnection)
+  {
+    mWaylandClientDisplay = pDisplay;
+    mWaylandClientParent = pParent;
+    mCloseWaylandClientConnection = std::move(closeConnection);
+  }
+#endif
+
+#if defined IPLUG_WAYLAND_TOPLEVEL && !defined NO_IGRAPHICS
+  bool ConnectWaylandClient(const char* title);
+  bool SetWaylandClientVisible(bool visible);
+  void SetWaylandClientTitle(const char* title);
+#endif
 
   bool GetTextFromClipboard(WDL_String& str) override;
+  void RequestClipboardText(std::function<void(const char*)> onText) override;
   bool SetTextInClipboard(const char* str) override;
 
 protected:
@@ -145,11 +173,52 @@ protected:
   void CreatePlatformTextEntry(int paramIdx, const IText& text, const IRECT& bounds, int length, const char* str) override;
 
 private:
+  bool DispatchLinuxKey(bool pressed, KeySym symbol, const char* text, int length, bool shift, bool control, bool alt);
+  bool DispatchLinuxDrop(const unsigned char* data, size_t length, float x, float y);
+  bool PrepareLinuxDialog(void* dialog);
 #if defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU
   void PresentCPUFrame(const SkPixmap& pixels) override;
   void DestroyCPUImage();
   XImage* mCPUImage = nullptr;
   GC mCPUGC = nullptr;
+#endif
+
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU && !defined NO_IGRAPHICS
+  void* OpenWaylandWindow();
+  void CloseWaylandWindow();
+  void ResizeWaylandWindow();
+  void PaintWaylandFrame(const SkPixmap& pixels);
+  bool ReadGtkWaylandClipboard(WDL_String& text);
+  bool WriteGtkWaylandClipboard(const char* text);
+  GtkWidget* mWaylandWindow = nullptr;
+  GtkWidget* mWaylandArea = nullptr;
+  cairo_t* mWaylandPaint = nullptr;
+  unsigned mWaylandTimer = 0;
+#endif
+
+#if defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  struct WaylandClientSurface;
+  void* OpenWaylandClientWindow();
+  void* GetWaylandClientWindow() const;
+  void CloseWaylandClientWindow();
+  void DrawWaylandClientWindow();
+  bool ReadWaylandClientClipboard(WDL_String& text);
+  void RequestWaylandClientClipboard(std::function<void(const char*)> onText);
+  bool WriteWaylandClientClipboard(const char* text);
+#ifdef IPLUG_WAYLAND_EGL
+  void ActivateWaylandClientGL();
+  void DeactivateWaylandClientGL();
+  bool IsGLContextActive() const override;
+#else
+  void PresentWaylandClientFrame(const SkPixmap& pixels);
+#endif
+  wl_display* mWaylandClientDisplay = nullptr;
+  wl_surface* mWaylandClientParent = nullptr;
+  WaylandClientSurface* mWaylandClient = nullptr;
+  std::function<void(wl_display*)> mCloseWaylandClientConnection;
+#ifdef IPLUG_WAYLAND_TOPLEVEL
+  WDL_String mWaylandClientTitle;
+#endif
 #endif
 
   void CalculateHostResize(int width, int height, int& designWidth, int& designHeight, float& scale);

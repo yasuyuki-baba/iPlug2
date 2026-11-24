@@ -78,6 +78,9 @@
   #elif defined OS_WIN
     #include "include/gpu/ganesh/gl/win/GrGLMakeWinInterface.h"
     #pragma comment(lib, "opengl32.lib")
+  #elif defined OS_LINUX && defined IPLUG_WAYLAND_EGL
+    #include <EGL/egl.h>
+    #include "include/gpu/ganesh/gl/GrGLAssembleInterface.h"
   #endif
 
 #endif
@@ -425,7 +428,15 @@ void IGraphicsSkia::OnViewInitialized(void* pContext)
 #elif defined OS_WIN
   auto glInterface = GrGLInterfaces::MakeWin();
 #elif defined OS_LINUX
+#ifdef IPLUG_WAYLAND_EGL
+  // The Linux Skia archive's native interface uses GLX. Resolve entry points
+  // against the current EGL context when the editor is on Wayland.
+  auto glInterface = strcmp(GetPlatformAPIStr(), "wayland") == 0
+    ? GrGLMakeAssembledGLInterface(nullptr, [](void*, const char* name) { return eglGetProcAddress(name); })
+    : GrGLMakeNativeInterface();
+#else
   auto glInterface = GrGLMakeNativeInterface();
+#endif
 #endif
   mGrContext = GrDirectContexts::MakeGL(glInterface);
 #elif defined IGRAPHICS_METAL
@@ -449,6 +460,7 @@ void IGraphicsSkia::OnViewDestroyed()
   RemoveAllControls();
 
 #if defined IGRAPHICS_GL
+  mCanvas = nullptr;
   mSurface = nullptr;
   mScreenSurface = nullptr;
   mGrContext = nullptr;
@@ -463,6 +475,8 @@ void IGraphicsSkia::OnViewDestroyed()
 void IGraphicsSkia::DrawResize()
 {
   ScopedGLContext scopedGLContext{this};
+  if (!scopedGLContext)
+    return;
   auto w = static_cast<int>(std::ceil(static_cast<float>(WindowWidth()) * GetScreenScale()));
   auto h = static_cast<int>(std::ceil(static_cast<float>(WindowHeight()) * GetScreenScale()));
   
@@ -495,12 +509,19 @@ void IGraphicsSkia::DrawResize()
     mSurface = SkSurfaces::Raster(info);
   #endif
 #endif
-  if (mSurface)
-  {
-    mCanvas = mSurface->getCanvas();
+  mCanvas = mSurface ? mSurface->getCanvas() : nullptr;
+  if (mCanvas)
     mCanvas->save();
-  }
 }
+
+#ifdef IPLUG_WAYLAND_EGL
+void IGraphicsSkia::OnViewContextLost()
+{
+  if (mGrContext)
+    mGrContext->abandonContext();
+  OnViewDestroyed();
+}
+#endif
 
 void IGraphicsSkia::BeginFrame()
 {
@@ -512,15 +533,26 @@ void IGraphicsSkia::BeginFrame()
     
     // Bind to the current main framebuffer
     int fbo = 0, samples = 0, stencilBits = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
-    glGetIntegerv(GL_SAMPLES, &samples);
-#if defined IGRAPHICS_GL3 && !defined OS_LINUX
-    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_STENCIL, GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &stencilBits);
-#else
-    // On Linux the GL3 context is a compatibility profile, where the default
-    // GLX framebuffer's stencil size is read with GL_STENCIL_BITS.
-    glGetIntegerv(GL_STENCIL_BITS, &stencilBits);
+#if defined OS_LINUX && defined IPLUG_WAYLAND_EGL
+    if (strcmp(GetPlatformAPIStr(), "wayland") == 0)
+    {
+      // EGL presents the default framebuffer, even if Ganesh last drew to
+      // an offscreen target. Its core profile exposes stencil via attachment queries.
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      mGrContext->resetContext(kRenderTarget_GrGLBackendState);
+      glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_STENCIL, GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &stencilBits);
+    }
+    else
 #endif
+    {
+      glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+#if defined IGRAPHICS_GL3 && !defined OS_LINUX
+      glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_STENCIL, GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &stencilBits);
+#else
+      glGetIntegerv(GL_STENCIL_BITS, &stencilBits);
+#endif
+    }
+    glGetIntegerv(GL_SAMPLES, &samples);
     
     GrGLFramebufferInfo fbInfo;
     fbInfo.fFBOID = fbo;

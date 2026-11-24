@@ -850,10 +850,24 @@ public:
   /** @return /c true if the platform window/view is open */
   virtual bool WindowIsOpen() { return GetWindow(); }
 
-  /** Get text from the clipboard
+  /** Get text from the clipboard synchronously. On native Wayland this can wait
+   * for the selection owner. Use RequestClipboardText() in UI callbacks.
    * @param str A WDL_String that will be filled with the text that is currently on the clipboard
    * @return /c true on success */
   virtual bool GetTextFromClipboard(WDL_String& str) = 0;
+
+  /** Requests clipboard text. Completion, if successful, runs on the UI thread
+   * and may be deferred. The text is valid for the duration of the callback.
+   * On native Wayland, an accepted request supersedes an unfinished request.
+   * Closing the editor cancels pending requests. Cancelled or failed requests
+   * do not call onText. Callers capturing a control should ensure it still
+   * exists when the callback runs. */
+  virtual void RequestClipboardText(std::function<void(const char*)> onText)
+  {
+    WDL_String text;
+    if (onText && GetTextFromClipboard(text))
+      onText(text.Get());
+  }
 
   /** Set text in the clipboard
    * @param str A CString that will be used to set the current text in the clipboard
@@ -977,6 +991,7 @@ public:
     ScopedGLContext(IGraphics* pGraphics)
     : mIGraphics(*pGraphics) { mIGraphics.ActivateGLContext(); }
     ~ScopedGLContext() { mIGraphics.DeactivateGLContext(); }
+    explicit operator bool() const { return mIGraphics.IsGLContextActive(); }
   private:
     IGraphics& mIGraphics;
   };
@@ -987,6 +1002,8 @@ protected:
 
   /* Deactivate the context for the view (GL only) */
   virtual void DeactivateGLContext() {};
+
+  virtual bool IsGLContextActive() const { return true; }
 
   /** Creates a platform native text entry field.
   * @param paramIdx The index of the parameter associated with the text entry field.

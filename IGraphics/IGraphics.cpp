@@ -1969,7 +1969,8 @@ void IGraphics::CreateTextEntry(IControl& control, const IText& text, const IREC
   else
     CreatePlatformTextEntry(paramIdx, text, bounds, control.GetTextEntryLength(), str);
   
-  mInTextEntry->SetDirty(false);
+  if (mInTextEntry)
+    mInTextEntry->SetDirty(false);
 }
 
 void IGraphics::DoCreatePopupMenu(IControl& control, IPopupMenu& menu, const IRECT& bounds, int valIdx, bool isContext)

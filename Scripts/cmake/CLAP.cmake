@@ -9,6 +9,7 @@
 # CLAP target configuration for iPlug2
 
 include(${CMAKE_CURRENT_LIST_DIR}/IPlug.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/LinuxWayland.cmake)
 
 if(NOT TARGET iPlug2::CLAP)
   # Define SDK paths
@@ -123,6 +124,14 @@ function(iplug_configure_clap target project_name)
       )
     endif()
   elseif(UNIX AND NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+    option(IPLUG_CLAP_WAYLAND "Enable experimental native Wayland floating editors for CLAP" OFF)
+    if(IPLUG_CLAP_WAYLAND)
+      iplug_get_wayland_graphics_backend(${target} graphics_backend)
+    endif()
+    if(IPLUG_CLAP_WAYLAND AND graphics_backend)
+      iplug_configure_wayland_client(${target} TRUE "${graphics_backend}")
+      target_compile_definitions(${target} PRIVATE IPLUG_CLAP_WAYLAND)
+    endif()
     set(CLAP_OUTPUT_DIR "${CMAKE_BINARY_DIR}/out")
     set_target_properties(${target} PROPERTIES
       OUTPUT_NAME "${project_name}"

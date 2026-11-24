@@ -92,10 +92,12 @@ bool IPlugAPPHost::Init()
   TryToChangeAudioDriverType(); // will init RTAudio with an API type based on gState->mAudioDriverType
 #endif
   ProbeAudioIO(); // find out what audio IO devs are available and put their IDs in the global variables gAudioInputDevs / gAudioOutputDevs
-  InitMidi(); // creates RTMidiIn and RTMidiOut objects
-  ProbeMidiIO(); // find out what midi IO devs are available and put their names in the global variables gMidiInputDevs / gMidiOutputDevs
-  SelectMIDIDevice(ERoute::kInput, mState.mMidiInDev.Get());
-  SelectMIDIDevice(ERoute::kOutput, mState.mMidiOutDev.Get());
+  if (InitMidi() && mMidiIn && mMidiOut)
+  {
+    ProbeMidiIO();
+    SelectMIDIDevice(ERoute::kInput, mState.mMidiInDev.Get());
+    SelectMIDIDevice(ERoute::kOutput, mState.mMidiOutDev.Get());
+  }
   
   mIPlug->OnParamReset(kReset);
   mIPlug->OnActivate(true);
@@ -419,6 +421,8 @@ void IPlugAPPHost::ProbeAudioIO()
 {
   mAudioInputDevIDs.clear();
   mAudioOutputDevIDs.clear();
+  mDefaultInputDev.reset();
+  mDefaultOutputDev.reset();
 
   if (!mDAC)
     return;
@@ -490,7 +494,7 @@ void IPlugAPPHost::ProbeMidiIO()
   }
 }
 
-bool IPlugAPPHost::AudioSettingsInStateAreEqual(AppState& os, AppState& ns)
+bool IPlugAPPHost::AudioSettingsInStateAreEqual(const AppState& os, const AppState& ns)
 {
   if (os.mAudioDriverType != ns.mAudioDriverType) return false;
   if (std::string_view(os.mAudioInDev.Get()) != ns.mAudioInDev.Get()) return false;
@@ -559,7 +563,7 @@ bool IPlugAPPHost::TryToChangeAudioDriverType()
   return false;
 }
 
-bool IPlugAPPHost::TryToChangeAudio()
+bool IPlugAPPHost::TryToChangeAudio(bool showDeviceErrorDialog)
 {
   // Skip audio initialization in no-I/O mode or screenshot mode
   if (mNoIO || IsScreenshotMode())
@@ -620,7 +624,7 @@ bool IPlugAPPHost::TryToChangeAudio()
     UpdateINI();
   }
 
-  if (failedToFindDevice)
+  if (failedToFindDevice && showDeviceErrorDialog)
     MessageBox(gHWND, "Please check the audio settings", "Error", MB_OK);
 
   if (inputID && outputID)

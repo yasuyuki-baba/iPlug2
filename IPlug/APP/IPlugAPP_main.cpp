@@ -531,6 +531,10 @@ INT_PTR SWELLAppMain(int msg, INT_PTR parm1, INT_PTR parm2)
 #pragma mark - LINUX
 #elif defined(OS_LINUX)
 #include "IPlugSWELL.h"
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && ((defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU) || defined IPLUG_WAYLAND_EGL) && !defined NO_IGRAPHICS
+  #include "IGraphicsLinux.h"
+  #include <gtk/gtk.h>
+#endif
 
 HWND gHWND;
 HINSTANCE gHINSTANCE;
@@ -539,20 +543,120 @@ bool gStandaloneCloseRequested = false;
 
 static bool gNoIO = false;
 
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && ((defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU) || defined IPLUG_WAYLAND_EGL) && !defined NO_IGRAPHICS
+static int RunWaylandStandalone()
+{
+  gdk_set_allowed_backends("wayland");
+#ifndef IPLUG_WAYLAND_EGL
+  if (!gtk_init_check(nullptr, nullptr))
+  {
+    fprintf(stderr, "Could not connect to a Wayland compositor\n");
+    return EXIT_FAILURE;
+  }
+
+#endif
+
+  SWELL_Internal_PostMessage_Init();
+  auto* pHost = IPlugAPPHost::Create();
+  pHost->SetNoIO(gNoIO);
+  if (!pHost->Init() || !pHost->GetPlug()->PrepareGraphics())
+    return EXIT_FAILURE;
+  if (!pHost->TryToChangeAudio(false))
+    fprintf(stderr, "Audio startup failed; check the standalone audio settings\n");
+
+  auto* pPlug = pHost->GetPlug();
+  auto* pGraphics = static_cast<igraphics::IGraphicsLinux*>(pPlug->GetUI());
+  GtkWindow* pPreferencesParent = nullptr;
+#ifdef IPLUG_WAYLAND_EGL
+  if (!pGraphics->ConnectWaylandClient(BUNDLE_NAME) || !pPlug->OpenWindow(nullptr))
+  {
+    fprintf(stderr, "Could not open the Wayland EGL window\n");
+    return EXIT_FAILURE;
+  }
+
+#else
+  GtkWidget* pWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+  pPreferencesParent = GTK_WINDOW(pWindow);
+  gtk_window_set_title(GTK_WINDOW(pWindow), BUNDLE_NAME);
+  gtk_window_set_default_size(GTK_WINDOW(pWindow), pGraphics->WindowWidth(), pGraphics->WindowHeight());
+  g_signal_connect(pWindow, "delete-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer) -> gboolean {
+    gStandaloneCloseRequested = true;
+    return TRUE;
+  }), nullptr);
+
+  pGraphics->SetWaylandWindow(pWindow);
+  if (!pPlug->OpenWindow(nullptr))
+  {
+    gtk_widget_destroy(pWindow);
+    return EXIT_FAILURE;
+  }
+
+  gtk_widget_show_all(pWindow);
+#endif
+
+  bool showPreferences = false;
+  pGraphics->SetKeyHandlerFunc([handler = pGraphics->GetKeyHandlerFunc(), &showPreferences](const IKeyPress& key, bool isUp) {
+    if (!isUp && key.C && !key.A && !key.S && key.VK == kVK_P)
+    {
+      showPreferences = true;
+      return true;
+    }
+    return handler && handler(key, isUp);
+  });
+
+  while (auto* pUI = static_cast<igraphics::IGraphicsLinux*>(pPlug->GetUI()))
+  {
+    if (gStandaloneCloseRequested || pUI->WindowCloseRequested())
+      break;
+#ifdef IPLUG_WAYLAND_EGL
+    pUI->OnDisplayTimer();
+#endif
+    while (!gStandaloneCloseRequested && g_main_context_iteration(nullptr, FALSE))
+      {}
+    if (showPreferences && !gStandaloneCloseRequested && pPlug->GetUI() == pUI && !pUI->WindowCloseRequested())
+    {
+      showPreferences = false;
+      pHost->ShowWaylandPreferences(pPreferencesParent);
+    }
+    SWELL_RunMessageLoop();
+    Sleep(5);
+  }
+  pHost->CloseAudio();
+  pHost->CloseWindow();
+#ifndef IPLUG_WAYLAND_EGL
+  gtk_widget_destroy(pWindow);
+#endif
+  return EXIT_SUCCESS;
+}
+#endif
+
 int main(int argc, char** argv)
 {
-  SWELL_initargs(&argc, &argv);
-  // Let SWELL forward events to GTK dialogs while retaining its own GDK event handler.
-  SWELL_ExtendedAPI("LOAD_GTK", nullptr);
-  SWELL_Internal_PostMessage_Init();
-  SWELL_ExtendedAPI("APPNAME", (void*) BUNDLE_NAME);
-
+  bool wayland = false;
   // Parse command line arguments
   for (int i = 1; i < argc; i++)
   {
     if (strcmp(argv[i], "--no-io") == 0)
       gNoIO = true;
+    else if (strcmp(argv[i], "--wayland") == 0)
+      wayland = true;
   }
+
+  if (wayland)
+  {
+#if defined IPLUG_EXPERIMENTAL_WAYLAND && ((defined IGRAPHICS_SKIA && defined IGRAPHICS_CPU) || defined IPLUG_WAYLAND_EGL) && !defined NO_IGRAPHICS
+    return RunWaylandStandalone();
+#else
+    fprintf(stderr, "--wayland requires IPLUG_EXPERIMENTAL_WAYLAND and Skia/CPU, Skia/GL3 or NanoVG/GL3\n");
+#endif
+    return EXIT_FAILURE;
+  }
+
+  SWELL_initargs(&argc, &argv);
+  // Let SWELL forward events to GTK dialogs while retaining its own GDK event handler.
+  SWELL_ExtendedAPI("LOAD_GTK", nullptr);
+  SWELL_Internal_PostMessage_Init();
+  SWELL_ExtendedAPI("APPNAME", (void*) BUNDLE_NAME);
 
   IPlugAPPHost* pAppHost = IPlugAPPHost::Create();
 

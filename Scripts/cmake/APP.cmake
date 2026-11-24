@@ -9,6 +9,7 @@
 # APP target configuration for iPlug2
 
 include(${CMAKE_CURRENT_LIST_DIR}/IPlug.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/LinuxWayland.cmake)
 
 if(NOT TARGET iPlug2::APP)
   add_library(iPlug2::APP INTERFACE IMPORTED)
@@ -198,6 +199,19 @@ function(iplug_configure_app target project_name)
   endif()
 
   if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
+    option(IPLUG_EXPERIMENTAL_WAYLAND "Enable the experimental standalone Wayland window" OFF)
+    if(IPLUG_EXPERIMENTAL_WAYLAND)
+      iplug_get_wayland_graphics_backend(${target} graphics_backend)
+    endif()
+    if(IPLUG_EXPERIMENTAL_WAYLAND AND graphics_backend)
+      target_compile_definitions(${target} PRIVATE IPLUG_EXPERIMENTAL_WAYLAND)
+      if(graphics_backend STREQUAL "iPlug2::IGraphics::Skia::CPU")
+        target_sources(${target} PRIVATE "${IPLUG2_DIR}/IGraphics/Platforms/IGraphicsLinuxWayland.cpp")
+      else()
+        iplug_configure_wayland_client(${target} TRUE "${graphics_backend}")
+      endif()
+    endif()
+
     set_source_files_properties(${IPLUG2_SWELL_SRC}
       TARGET_DIRECTORY ${target}
       PROPERTIES

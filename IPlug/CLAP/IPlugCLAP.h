@@ -179,6 +179,14 @@ private:
   bool guiIsApiSupported(const char* api, bool isFloating) noexcept override;
   bool guiSetParent(const clap_window* pWindow) noexcept override;
   
+#if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
+  bool guiGetPreferredApi(const char** api, bool* isFloating) noexcept override;
+  void guiSuggestTitle(const char* title) noexcept override;
+  bool mWaylandGui = false;
+  bool mWaylandGuiClosed = false;
+  WDL_String mWaylandGuiTitle;
+#endif
+
   // Helper to attach GUI Windows
   bool GUIWindowAttach(void* parent) noexcept;
 

@@ -352,6 +352,8 @@ APIBitmap* IGraphicsNanoVG::LoadAPIBitmap(const char* fileNameOrResID, int scale
   if (location == EResourceLocation::kAbsolutePath)
   {
     ScopedGLContext scopedGLCtx {this};
+    if (!scopedGLCtx)
+      return nullptr;
     idx = nvgCreateImage(mVG, fileNameOrResID, nvgImageFlags);
   }
 
@@ -370,6 +372,8 @@ APIBitmap* IGraphicsNanoVG::LoadAPIBitmap(const char* name, const void* pData, i
 
     {
       ScopedGLContext scopedGLCtx {this};
+      if (!scopedGLCtx)
+        return nullptr;
       idx = nvgCreateImageMem(mVG, nvgImageFlags, (unsigned char*)pData, dataSize);
     }
     
@@ -472,14 +476,16 @@ void IGraphicsNanoVG::OnViewInitialized(void* pContext)
 
 void IGraphicsNanoVG::OnViewDestroyed()
 {
+  mInDraw = false;
   // need to remove all the controls to free framebuffers, before deleting context
   RemoveAllControls();
 
   StaticStorage<APIBitmap>::Accessor storage(mBitmapCache);
   storage.Clear();
-  
+  ClearFBOStack();
+
   if(mMainFrameBuffer != nullptr)
-    nvgDeleteFramebuffer(mMainFrameBuffer);
+    DeleteFBO(mMainFrameBuffer);
   
   mMainFrameBuffer = nullptr;
   
@@ -489,9 +495,33 @@ void IGraphicsNanoVG::OnViewDestroyed()
   mVG = nullptr;
 }
 
+#ifdef IPLUG_WAYLAND_EGL
+void IGraphicsNanoVG::OnViewContextLost()
+{
+  // EGL will release the GL objects with the context. Disarm the NanoVG
+  // deletion hooks before releasing CPU-side data and controls.
+  if (mVG)
+  {
+    auto* renderer = static_cast<GLNVGcontext*>(nvgInternalParams(mVG)->userPtr);
+    renderer->shader = {};
+    renderer->vertBuf = renderer->vertArr = 0;
+#if NANOVG_GL_USE_UNIFORMBUFFER
+    renderer->fragBuf = 0;
+#endif
+    for (int i = 0; i < renderer->ntextures; ++i)
+      renderer->textures[i].flags |= NVG_IMAGE_NODELETE;
+  }
+  mContextLost = true;
+  OnViewDestroyed();
+  mContextLost = false;
+}
+#endif
+
 void IGraphicsNanoVG::DrawResize()
 {
   ScopedGLContext scopedGLCtx {this};
+  if (!scopedGLCtx)
+    return;
 
   if (mMainFrameBuffer != nullptr)
   {
@@ -920,6 +950,14 @@ void IGraphicsNanoVG::DrawDottedRect(const IColor& color, const IRECT& bounds, c
 
 void IGraphicsNanoVG::DeleteFBO(NVGframebuffer* pBuffer)
 {
+#ifdef IPLUG_WAYLAND_EGL
+  if (mContextLost)
+  {
+    pBuffer->fbo = pBuffer->rbo = 0;
+    nvgDeleteFramebuffer(pBuffer);
+    return;
+  }
+#endif
   if (!mInDraw)
     nvgDeleteFramebuffer(pBuffer);
   else
@@ -934,6 +972,10 @@ void IGraphicsNanoVG::ClearFBOStack()
   WDL_MutexLock lock(&mFBOMutex);
   while (!mFBOStack.empty())
   {
+#ifdef IPLUG_WAYLAND_EGL
+    if (mContextLost)
+      mFBOStack.top()->fbo = mFBOStack.top()->rbo = 0;
+#endif
     nvgDeleteFramebuffer(mFBOStack.top());
     mFBOStack.pop();
   }

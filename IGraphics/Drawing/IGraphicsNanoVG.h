@@ -100,6 +100,9 @@ public:
   void EndFrame() override;
   void OnViewInitialized(void* pContext) override;
   void OnViewDestroyed() override;
+#ifdef IPLUG_WAYLAND_EGL
+  void OnViewContextLost();
+#endif
   void DrawResize() override;
 
   void DrawBitmap(const IBitmap& bitmap, const IRECT& dest, int srcX, int srcY, const IBlend* pBlend) override;
@@ -164,6 +167,9 @@ private:
   void ClearFBOStack();
   
   bool mInDraw = false;
+#ifdef IPLUG_WAYLAND_EGL
+  bool mContextLost = false;
+#endif
   WDL_Mutex mFBOMutex;
   std::stack<NVGframebuffer*> mFBOStack; // A stack of FBOs that requires freeing at the end of the frame
   StaticStorage<APIBitmap> mBitmapCache; //not actually static (doesn't require retaining or releasing)
