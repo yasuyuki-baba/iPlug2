@@ -54,20 +54,29 @@ if ! WAYLAND_DEBUG=client timeout 20s "$runtime/clap-lifecycle" "$1" >"$runtime/
   tail -100 "$runtime/client.log" >&2
   exit 1
 fi
+if ! awk '
+  /CLAP editor hidden/ { hidden = 1; ++intervals }
+  /CLAP hidden interval ended/ { hidden = 0 }
+  hidden && /wl_surface[@#][0-9]+[.]attach[(]wl_buffer[@#]/ { invalid = 1 }
+  END { exit invalid || intervals != 3 }
+' "$runtime/client.log"; then
+  tail -100 "$runtime/client.log" >&2
+  exit 1
+fi
 grep 'CLAP Wayland smoke test:' "$runtime/client.log"
 
-# A lost compositor connection must notify the host and release the GUI timer.
+# A lost compositor connection while hidden must notify the host and release the GUI timer.
 : >"$runtime/disconnect.log"
 WAYLAND_DEBUG=client timeout 20s "$runtime/clap-lifecycle" "$1" interactive >"$runtime/disconnect.log" 2>&1 &
 client_pid=$!
 for ((attempt = 0; attempt < 50; ++attempt)); do
-  grep -Eq 'wl_surface[@#][0-9]+\.attach\(wl_buffer[@#]' "$runtime/disconnect.log" && break
+  grep -Fq 'CLAP editor hidden' "$runtime/disconnect.log" && break
   sleep .1
 done
 kill "$weston_pid"
 wait "$weston_pid" || true
 weston_pid=
-if ! wait "$client_pid" || ! grep -Fq 'host received closed(true)' "$runtime/disconnect.log"; then
+if ! wait "$client_pid" || ! grep -Fq 'hidden editor reported closed(true)' "$runtime/disconnect.log"; then
   tail -100 "$runtime/disconnect.log" >&2
   exit 1
 fi

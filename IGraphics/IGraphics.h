@@ -857,7 +857,11 @@ public:
   virtual bool GetTextFromClipboard(WDL_String& str) = 0;
 
   /** Requests clipboard text. Completion, if successful, runs on the UI thread
-   * and may be deferred. The text is valid for the duration of the callback. */
+   * and may be deferred. The text is valid for the duration of the callback.
+   * On native Wayland, an accepted request supersedes an unfinished request.
+   * Closing the editor cancels pending requests. Cancelled or failed requests
+   * do not call onText. Callers capturing a control should ensure it still
+   * exists when the callback runs. */
   virtual void RequestClipboardText(std::function<void(const char*)> onText)
   {
     WDL_String text;

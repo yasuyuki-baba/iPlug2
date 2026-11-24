@@ -280,6 +280,20 @@ struct IGraphicsLinux::WaylandClientSurface
 
   bool mViewInitialized = false;
   bool mPresented = false;
+  unsigned mShmFailures = 0;
+  std::chrono::steady_clock::time_point mRetryShmAt{};
+
+  void RetryShmFrame()
+  {
+    if (++mShmFailures >= 5)
+    {
+      fprintf(stderr, "Could not present a Wayland shared-memory frame after five attempts\n");
+      mGraphics->RequestWindowClose();
+      return;
+    }
+    mRetryShmAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    mGraphics->mNeedsRedraw = true;
+  }
 #ifdef IPLUG_WAYLAND_TOPLEVEL
   xdg_wm_base* mShell = nullptr;
   xdg_surface* mXdgSurface = nullptr;
@@ -486,10 +500,15 @@ struct IGraphicsLinux::WaylandClientSurface
 
   void RequestClipboard(std::function<void(const char*)> done)
   {
-    if (!done)
+    if (!done || mGraphics->mCloseRequested)
       return;
     if (mClipboardSource)
     {
+      if (mClipboardRead)
+      {
+        close(mClipboardRead->fd);
+        mClipboardRead.reset();
+      }
       const std::string text = mClipboardText.Get();
       done(text.c_str());
       return;
@@ -1432,14 +1451,19 @@ void IGraphicsLinux::DrawWaylandClientWindow()
   }
 
   mWaylandClient->PumpClipboardTransfers();
-  if (!mCloseRequested)
-    mWaylandClient->RepeatKey();
+  if (mCloseRequested)
+    return;
+#ifdef IPLUG_WAYLAND_TOPLEVEL
+  if (mWaylandClient->mHidden)
+    return;
+#endif
+  mWaylandClient->RepeatKey();
   if (mCloseRequested)
     return;
 #ifdef IPLUG_WAYLAND_TOPLEVEL
   if (mWaylandClient->mToplevel)
   {
-    if (mWaylandClient->mHidden || !mWaylandClient->mConfigured)
+    if (!mWaylandClient->mConfigured)
       return;
     mWaylandClient->UpdateBufferScale();
   }
@@ -1467,6 +1491,8 @@ void IGraphicsLinux::DrawWaylandClientWindow()
   if (!mNeedsRedraw)
     return;
   auto& window = *mWaylandClient;
+  if (std::chrono::steady_clock::now() < window.mRetryShmAt)
+    return;
 #ifdef IPLUG_WAYLAND_EGL
   if (!window.mEGLWindow && window.mBuffers[0].busy && window.mBuffers[1].busy)
     return;
@@ -1517,7 +1543,7 @@ void IGraphicsLinux::DrawWaylandClientWindow()
     }
   }
   else if (!window.mEGLWindow)
-    mNeedsRedraw = true;
+    window.RetryShmFrame();
   else
   {
     fprintf(stderr, "Could not present a Wayland EGL frame\n");
@@ -1556,17 +1582,24 @@ void IGraphicsLinux::DeactivateWaylandClientGL()
   window.mContextStack.pop_back();
   if (state.context == window.mEGLContext)
     return;
-  if (state.context != EGL_NO_CONTEXT)
-  {
-    if (!eglBindAPI(state.api) || !eglMakeCurrent(state.display, state.draw, state.read, state.context))
-      fprintf(stderr, "Could not restore the previous EGL context\n");
+  const auto restore = [&] {
+    if (state.context != EGL_NO_CONTEXT)
+      return eglBindAPI(state.api) && eglMakeCurrent(state.display, state.draw, state.read, state.context);
+
+    if (eglGetCurrentContext() == window.mEGLContext &&
+        !eglMakeCurrent(window.mEGLDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT))
+      return false;
+    return eglBindAPI(state.api) && (!state.glxContext ||
+      glXMakeContextCurrent(state.glxDisplay, state.glxDraw, state.glxRead, state.glxContext));
+  };
+  if (restore() || restore())
     return;
-  }
+
+  fprintf(stderr, "Could not restore the host GL context, closing the Wayland editor\n");
+  // Avoid leaving the plug-in context current on the host thread.
   if (eglGetCurrentContext() == window.mEGLContext)
     eglMakeCurrent(window.mEGLDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-  eglBindAPI(state.api);
-  if (state.glxContext && !glXMakeContextCurrent(state.glxDisplay, state.glxDraw, state.glxRead, state.glxContext))
-    fprintf(stderr, "Could not restore the previous GLX context\n");
+  RequestWindowClose();
 }
 #endif
 
@@ -1607,6 +1640,7 @@ bool IGraphicsLinux::WaylandClientSurface::PresentShmFrame(int width, int height
   }
   if (!readPixels(slot.pixels, stride))
     return false;
+  mShmFailures = 0;
   slot.busy = true;
   wl_surface_attach(mSurface, slot.buffer, 0, 0);
   wl_surface_damage(mSurface, 0, 0, width, height);
@@ -1633,7 +1667,7 @@ void IGraphicsLinux::PresentWaylandClientFrame(const SkPixmap& pixels)
   }))
     window.mPresented = true;
   else
-    mNeedsRedraw = true;
+    window.RetryShmFrame();
 }
 #endif
 

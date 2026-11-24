@@ -1036,11 +1036,9 @@ bool IPlugCLAP::guiShow() noexcept
     auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI());
     if (pGraphics->WindowIsOpen())
     {
-      if (!RegisterLinuxHostCallbacks())
-        return false;
       mGUIOpen = pGraphics->SetWaylandClientVisible(true);
       if (!mGUIOpen)
-        UnregisterLinuxHostCallbacks();
+        CheckLinuxGuiClosed();
       return mGUIOpen;
     }
     if (!pGraphics->ConnectWaylandClient(mWaylandGuiTitle.Get()) || !GUIWindowAttach(nullptr))
@@ -1081,12 +1079,10 @@ bool IPlugCLAP::guiHide() noexcept
   mWebViewTimer.reset();
   mWebViewPending = false;
 #endif
-#if defined OS_LINUX && !defined NO_IGRAPHICS
-  UnregisterLinuxHostCallbacks();
-#endif
 #if defined OS_LINUX && defined IPLUG_CLAP_WAYLAND && defined IPLUG_WAYLAND_CLIENT && !defined NO_IGRAPHICS
   if (mWaylandGui)
   {
+    // Keep dispatching the connection for clipboard transfers and disconnects.
     if (!mGUIOpen)
       return true;
     if (static_cast<IGraphicsLinux*>(GetUI())->SetWaylandClientVisible(false))
@@ -1097,6 +1093,9 @@ bool IPlugCLAP::guiHide() noexcept
     CheckLinuxGuiClosed();
     return false;
   }
+#endif
+#if defined OS_LINUX && !defined NO_IGRAPHICS
+  UnregisterLinuxHostCallbacks();
 #endif
   if (HasUI())
   {
@@ -1371,7 +1370,7 @@ uint32_t IPlugCLAP::NChannels(ERoute direction, uint32_t bus) const
 #if defined OS_LINUX && !defined NO_IGRAPHICS
 void IPlugCLAP::onTimer(clap_id timerId) noexcept
 {
-  if (mGUIOpen && timerId != CLAP_INVALID_ID && timerId == mLinuxTimerId)
+  if (timerId != CLAP_INVALID_ID && timerId == mLinuxTimerId)
     if (auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI()))
     {
       pGraphics->OnDisplayTimer();
@@ -1402,7 +1401,7 @@ void IPlugCLAP::onMainThread() noexcept
   if (mLinuxIdlePending.exchange(false))
     OnTimer();
 #ifndef NO_IGRAPHICS
-  if (mLinuxCallbackPending.exchange(false) && mGUIOpen)
+  if (mLinuxCallbackPending.exchange(false))
     if (auto* pGraphics = static_cast<IGraphicsLinux*>(GetUI()))
     {
       pGraphics->OnDisplayTimer();

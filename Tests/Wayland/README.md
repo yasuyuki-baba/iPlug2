@@ -87,7 +87,9 @@ creates an xdg-shell toplevel and dispatches its events on host timer ticks
 or main-thread callbacks. It also advertises the existing embedded X11
 editor. To test without a DAW, the smoke test loads the actual module in a
 small CLAP host, checks repeated show/hide and destruction, and verifies
-the host's close notification when the Wayland connection is lost.
+that the editor keeps dispatching events without submitting frames while hidden.
+It also verifies the host's close notification when the connection is lost
+while the editor is hidden.
 
 The floating editor uses the highest integer scale of the outputs it occupies.
 The smoke test checks a 2× output and reuses the editor and its Wayland surface

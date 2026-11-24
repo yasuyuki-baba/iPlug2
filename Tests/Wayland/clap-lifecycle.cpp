@@ -107,32 +107,41 @@ int main(int argc, char** argv)
   }
   else
   {
+    auto tick = [&] {
+      if (state.mCallbackRequested.exchange(false))
+        plugin->on_main_thread(plugin);
+      if (state.mTimer != CLAP_INVALID_ID)
+        timers->on_timer(plugin, state.mTimer);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    };
     for (int cycle = 0; cycle < (interactive ? 1 : 3); ++cycle)
     {
       Require(gui->show(plugin) && state.mTimer != CLAP_INVALID_ID, "could not show floating editor");
+      const auto timer = state.mTimer;
       Require(gui->show(plugin), "could not show an already visible editor");
       if (cycle == 0 && !interactive)
       {
         Require(gui->hide(plugin) && gui->hide(plugin), "hide before the first frame failed");
-        Require(state.mTimer == CLAP_INVALID_ID && gui->show(plugin), "show before the first frame failed");
+        tick();
+        Require(state.mTimer == timer && gui->show(plugin), "show before the first frame failed");
       }
-      for (int frame = 0; frame < (interactive ? 6000 : 35) && !state.mGuiClosed; ++frame)
+      for (int frame = 0; frame < 35 && !state.mGuiClosed; ++frame)
+        tick();
+      Require(!state.mGuiClosed, "compositor closed the editor unexpectedly");
+      Require(gui->hide(plugin) && state.mTimer == timer, "hide changed the Wayland event timer");
+      std::fputs("CLAP editor hidden\n", stderr);
+      for (int frame = 0; frame < (interactive ? 6000 : 10) && !state.mGuiClosed; ++frame)
+        tick();
+      std::fputs("CLAP hidden interval ended\n", stderr);
+      if (interactive)
       {
-        if (state.mCallbackRequested.exchange(false))
-          plugin->on_main_thread(plugin);
-        if (state.mTimer != CLAP_INVALID_ID)
-          timers->on_timer(plugin, state.mTimer);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      }
-      if (interactive && state.mGuiClosed)
-      {
+        Require(state.mGuiClosed, "hidden editor did not report compositor disconnect");
         Require(!gui->show(plugin), "closed editor could show before destroy acknowledgement");
         Require(state.mTimer == CLAP_INVALID_ID, "compositor close left the timer registered");
-        std::puts("CLAP Wayland smoke test: host received closed(true)");
-        break;
+        std::puts("CLAP Wayland smoke test: hidden editor reported closed(true)");
       }
-      Require(!state.mGuiClosed, "compositor closed the editor unexpectedly");
-      Require(gui->hide(plugin) && state.mTimer == CLAP_INVALID_ID, "hide left the timer registered");
+      else
+        Require(state.mTimer == timer, "hidden editor lost its Wayland event timer");
     }
   }
   gui->destroy(plugin);
